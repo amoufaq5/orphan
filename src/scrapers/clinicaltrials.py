@@ -126,6 +126,18 @@ class ClinicalTrialsGovScraper(BaseScraper):
         # Conditions (list of strings)
         conditions = cond.get("conditions") or []
 
-        # Outcomes
+                # Outcomes
         prim = outs.get("primaryOutcomes") or []
-        prim_meas = [o.get("measure") for o in pr]()_
+        prim_meas = [
+            o.get("measure")
+            for o in prim
+            if isinstance(o, dict) and o.get("measure")
+        ]
+
+        sec = outs.get("secondaryOutcomes") or []
+        sec_meas = [
+            o.get("measure")
+            for o in sec
+            if isinstance(o, dict) and o.get("measure")
+        ]
+
