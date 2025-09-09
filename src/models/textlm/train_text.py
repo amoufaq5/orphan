@@ -12,7 +12,8 @@ log = get_logger("train")
 def build_dataloader(cfg, spm_path: str, world_size: int = 1):
     data_cfg = cfg["train"]["data"]
     globs = [data_cfg["train_glob"]] if isinstance(data_cfg["train_glob"], str) else data_cfg["train_glob"]
-    tok = SentencePieceWrapper(spm_path, pad_id=0, unk_id=3)  # adjust if different
+    # UPDATED: read pad/unk ids from the model
+    tok = SentencePieceWrapper(spm_path)
     ds = PackedLMIterable(
         tokenizer=tok,
         globs=globs,
@@ -77,8 +78,7 @@ def main():
         betas=tuple(opt_cfg.get("betas", [0.9, 0.95])),
         eps=float(opt_cfg.get("eps", 1e-8)),
     )
-    # estimate steps
-    total_steps = int(opt_cfg.get("epochs", 1) * 100000)  # rough placeholder; you can make this precise later
+    total_steps = int(opt_cfg.get("epochs", 1) * 100000)  # rough placeholder
     warmup_ratio = float(opt_cfg.get("warmup_ratio", 0.06))
     scheduler = CosineWithWarmup(optimizer, warmup_steps=int(total_steps*warmup_ratio), total_steps=total_steps)
 
@@ -107,7 +107,6 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     running = 0.0
-    tokens_seen = 0
     start = time.time()
 
     for batch in loader:
@@ -129,15 +128,16 @@ def main():
 
         if step % log_every == 0 and step > 0:
             tokps = (batch.numel() * log_every) / (time.time() - start + 1e-6)
+            import math
             ppl = math.exp(min(20.0, running / log_every))
             log.info(f"step={step} loss={running/log_every:.4f} ppl≈{ppl:.2f} tok/s≈{tokps:.0f}")
             running = 0.0
             start = time.time()
 
         if step % eval_every == 0 and step > 0:
+            import math
             model.eval()
             with torch.no_grad():
-                # quick dev perplexity on a few minibatches
                 eval_loss, n = 0.0, 0
                 for i, eb in enumerate(loader):
                     if i >= 20: break
@@ -148,16 +148,6 @@ def main():
                 eval_loss /= max(1, n)
                 eval_ppl = math.exp(min(20.0, eval_loss))
                 log.info(f"[eval] step={step} loss={eval_loss:.4f} ppl≈{eval_ppl:.2f}")
-                if best_eval is None or eval_ppl < best_eval:
-                    best_eval = eval_ppl
-                    save_checkpoint(os.path.join(out_dir, f"best.pt"), {
-                        "model": model.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "scheduler": scheduler.state_dict(),
-                        "step": step,
-                        "best_eval": best_eval,
-                        "cfg": cfg,
-                    })
             model.train()
 
         if step % save_every == 0 and step > 0:
