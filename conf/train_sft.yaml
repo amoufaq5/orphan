@@ -5,23 +5,23 @@ sft:
       - "data/canonical/canonical*.jsonl"
     out_jsonl: "out/sft/tasks.sft.jsonl"
     max_tasks:
-      drug_label: 20000     # cap per type for first run
+      drug_label: 20000
       trial: 10000
       article: 10000
-    min_section_chars: 120  # skip tiny fragments
-    languages: ["en", "ar"] # we’ll generate EN now; AR hooks left in templates
+    min_section_chars: 120
+    languages: ["en", "ar"]
 
   templates:
-    persona: "doctor"       # "patient" | "doctor" | "pharmacist"
-    enforce_citations: true # inserts <cite> tags & expects them in answers
-    otc_first: true         # add OTC-then-refer guardrails for patient/pharmacist
+    persona: "doctor"          # "patient" | "doctor" | "pharmacist"
+    enforce_citations: true
+    otc_first: true
 
   data:
     train_path: "out/sft/tasks.sft.jsonl"
-    max_seq_len: 4096
-    batch_size: 8
-    grad_accum: 2
-    shuffle_buffer: 20000
+    max_seq_len: 1024          # ↓ lowered for CPU safety (use 512 if still tight)
+    batch_size: 2              # ↓ lowered for CPU safety (use 1 if still tight)
+    grad_accum: 1
+    shuffle_buffer: 4000
 
   optimization:
     lr: 2.0e-5
@@ -29,13 +29,13 @@ sft:
     epochs: 1
     warmup_ratio: 0.06
     betas: [0.9, 0.95]
-    amp: true
+    amp: false                 # CPU run; AMP off; auto-enabled if you switch to CUDA code path later
     max_grad_norm: 1.0
     seed: 1337
 
   model:
     spm_model: "out/tokenizer/orph_spm.model"
     special_tokens: ["<pad>", "<s>", "</s>", "<unk>", "<triage>", "<referral>", "<cite>", "<arabic>", "<english>"]
-    ckpt_in: "out/text_orphgpt/best.pt"   # initialize from your pretrain (optional)
+    ckpt_in: "out/text_orphgpt/best.pt"
     ckpt_out_dir: "out/sft_orphgpt"
     keep_last_n: 3
