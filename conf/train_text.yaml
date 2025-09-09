@@ -9,6 +9,16 @@ train:
     normalization: "NFKC"
     special_tokens: ["<pad>", "<s>", "</s>", "<unk>", "<triage>", "<referral>", "<cite>", "<arabic>", "<english>"]
 
+tokenizer_corpus:
+  input_globs:
+    - "data/canonical/canonical*.jsonl"
+  include_types: ["article", "drug_label", "trial"]
+  max_docs: 100000
+  output_txt: "out/tokenizer/corpus.txt"
+  dedupe_by_hash: true
+  arabic_hint_token: "<arabic>"
+  english_hint_token: "<english>"
+
   textlm:
     model_dim: 768
     n_layers: 16
