@@ -1,0 +1,41 @@
+sft:
+  # source → task builders
+  build:
+    input_globs:
+      - "data/canonical/canonical*.jsonl"
+    out_jsonl: "out/sft/tasks.sft.jsonl"
+    max_tasks:
+      drug_label: 20000     # cap per type for first run
+      trial: 10000
+      article: 10000
+    min_section_chars: 120  # skip tiny fragments
+    languages: ["en", "ar"] # we’ll generate EN now; AR hooks left in templates
+
+  templates:
+    persona: "doctor"       # "patient" | "doctor" | "pharmacist"
+    enforce_citations: true # inserts <cite> tags & expects them in answers
+    otc_first: true         # add OTC-then-refer guardrails for patient/pharmacist
+
+  data:
+    train_path: "out/sft/tasks.sft.jsonl"
+    max_seq_len: 4096
+    batch_size: 8
+    grad_accum: 2
+    shuffle_buffer: 20000
+
+  optimization:
+    lr: 2.0e-5
+    weight_decay: 0.05
+    epochs: 1
+    warmup_ratio: 0.06
+    betas: [0.9, 0.95]
+    amp: true
+    max_grad_norm: 1.0
+    seed: 1337
+
+  model:
+    spm_model: "out/tokenizer/orph_spm.model"
+    special_tokens: ["<pad>", "<s>", "</s>", "<unk>", "<triage>", "<referral>", "<cite>", "<arabic>", "<english>"]
+    ckpt_in: "out/text_orphgpt/best.pt"   # initialize from your pretrain (optional)
+    ckpt_out_dir: "out/sft_orphgpt"
+    keep_last_n: 3
