@@ -1,0 +1,22 @@
+
+---
+
+### `conf/app.yaml`
+```yaml
+app:
+  name: orphan-studio
+  env: dev
+  log_level: INFO
+  api:
+    host: 0.0.0.0
+    port: 8000
+    workers: 1
+    cors_origins: ["*"]
+security:
+  jwt_secret: "CHANGE_ME_IN_ENV"
+  jwt_algorithm: HS256
+  token_ttl_minutes: 120
+audit:
+  enabled: true
+  sink: "file"
+  path: "out/audit.log"
