@@ -15,7 +15,7 @@ class RMSNorm(nn.Module):
         return _rms_norm(x, self.weight, self.eps)
 
 class RotaryPositionalEmbedding:
-    """RoPE helper for Q/K."""
+    """RoPE helper for Q/K; dimension must be per-head (head_dim)."""
     def __init__(self, dim: int, max_seq_len: int, base: float = 10000.0):
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         t = torch.arange(max_seq_len, dtype=torch.float)
@@ -25,6 +25,7 @@ class RotaryPositionalEmbedding:
         self.sin_cached = emb.sin()[None, None, :, :] # [1,1,T,dim]
 
     def apply(self, x: torch.Tensor, seq_len: int) -> torch.Tensor:
+        # x: [B, H, T, head_dim]
         cos = self.cos_cached[..., :seq_len, :].to(x.device, x.dtype)
         sin = self.sin_cached[..., :seq_len, :].to(x.device, x.dtype)
         x1, x2 = x[..., ::2], x[..., 1::2]
@@ -56,12 +57,12 @@ class Attention(nn.Module):
     def forward(self, x, attn_mask=None):
         B, T, C = x.size()
         qkv = self.qkv(x).view(B, T, 3, self.n_heads, self.head_dim).permute(2,0,3,1,4)
-        q, k, v = qkv[0], qkv[1], qkv[2]   # [B,h,T,hd]
+        q, k, v = qkv[0], qkv[1], qkv[2]   # [B,H,T,head_dim]
         if self.rope is not None:
             q = self.rope.apply(q, T)
             k = self.rope.apply(k, T)
-        # Scaled Dot-Product Attention with built-in causal masking
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, is_causal=True)  # [B,h,T,hd]
+        # Scaled Dot-Product Attention with built-in causal masking (memory-friendly)
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, is_causal=True)  # [B,H,T,head_dim]
         y = y.transpose(1,2).contiguous().view(B, T, C)
         return self.drop(self.proj(y))
 
@@ -73,7 +74,7 @@ class Block(nn.Module):
         self.norm2 = RMSNorm(d_model) if norm_type == "rms" else nn.LayerNorm(d_model)
         self.mlp = MLP(d_model, ffn_mult, dropout)
     def forward(self, x, attn_mask=None):
-        x = x + self.attn(self.norm1(x), attn_mask=None)  # SDPA handles causal
+        x = x + self.attn(self.norm1(x), attn_mask=None)  # SDPA handles causal masking
         x = x + self.mlp(self.norm2(x))
         return x
 
@@ -84,7 +85,12 @@ class OrphGPT(nn.Module):
         self.tok_emb = nn.Embedding(vocab_size, d_model)
         self.pos_emb = None if use_rope else nn.Embedding(max_seq_len, d_model)
         self.dropout = nn.Dropout(dropout)
-        rope = RotaryPositionalEmbedding(d_model, max_seq_len) if use_rope else None
+
+        # ✅ RoPE must use per-head dimension, not d_model
+        head_dim = d_model // n_heads
+        assert head_dim % 2 == 0, "head_dim must be even for RoPE"
+        rope = RotaryPositionalEmbedding(head_dim, max_seq_len) if use_rope else None
+
         self.blocks = nn.ModuleList([Block(d_model, n_heads, ffn_mult, dropout, norm_type, rope) for _ in range(n_layers)])
         self.norm = RMSNorm(d_model) if norm_type == "rms" else nn.LayerNorm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
@@ -114,7 +120,9 @@ class OrphGPT(nn.Module):
         logits = self.lm_head(x)
         loss = None
         if labels is not None:
-            loss = nn.functional.cross_entropy(logits[:, :-1, :].contiguous().view(-1, self.vocab_size),
-                                               labels[:, 1:].contiguous().view(-1),
-                                               ignore_index=-100)
+            loss = nn.functional.cross_entropy(
+                logits[:, :-1, :].contiguous().view(-1, self.vocab_size),
+                labels[:, 1:].contiguous().view(-1),
+                ignore_index=-100
+            )
         return logits, loss
