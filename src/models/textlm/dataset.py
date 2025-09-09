@@ -1,22 +1,28 @@
 from __future__ import annotations
 import glob, orjson, random, torch
-from typing import List, Dict, Any, Iterable, Tuple, Optional
+from typing import List, Dict, Any, Iterable, Optional
 from ..tokenizer.build_corpus import _norm  # reuse normalization
 from ...utils.logger import get_logger
 
 log = get_logger("text-ds")
 
 class SentencePieceWrapper:
-    def __init__(self, spm_model_path: str, pad_id: int = 0, unk_id: int = 3):
+    def __init__(self, spm_model_path: str):
         import sentencepiece as spm
         self.proc = spm.SentencePieceProcessor()
         self.proc.Load(spm_model_path)
-        self.pad_id = pad_id
-        self.unk_id = unk_id
+        # read true IDs from the model
+        self.pad_id = self.proc.pad_id() if hasattr(self.proc, "pad_id") else self.proc.PieceToId("<pad>")
+        self.unk_id = self.proc.unk_id() if hasattr(self.proc, "unk_id") else self.proc.PieceToId("<unk>")
+        if self.pad_id < 0:
+            self.pad_id = self.proc.PieceToId("<pad>")
+
     def encode(self, s: str) -> List[int]:
         return self.proc.EncodeAsIds(s)
+
     def pad(self, ids: List[int], length: int) -> List[int]:
-        if len(ids) >= length: return ids[:length]
+        if len(ids) >= length:
+            return ids[:length]
         return ids + [self.pad_id] * (length - len(ids))
 
 def _extract_text(doc: Dict[str, Any], paths: List[str]) -> str:
@@ -34,7 +40,7 @@ def _extract_text(doc: Dict[str, Any], paths: List[str]) -> str:
         if t: pieces.append(t)
     return "\n\n".join(pieces).strip()
 
-def stream_docs(globs: List[str], text_fields: List[str], shuffle_buffer: int, max_docs: int | None = None) -> Iterable[str]:
+def stream_docs(globs: List[str], text_fields: List[str], shuffle_buffer: int, max_docs: Optional[int] = None) -> Iterable[str]:
     files = []
     for g in globs: files.extend(glob.glob(g))
     files.sort()
@@ -53,7 +59,7 @@ def stream_docs(globs: List[str], text_fields: List[str], shuffle_buffer: int, m
                 buf.append(text)
                 if len(buf) >= shuffle_buffer:
                     random.shuffle(buf)
-                    for s in buf: 
+                    for s in buf:
                         yield s
                         total += 1
                         if max_docs and total >= max_docs: return
@@ -78,23 +84,20 @@ class PackedLMIterable(torch.utils.data.IterableDataset):
 
     def __iter__(self):
         cur: List[int] = []
-        yielded = 0
         for text in stream_docs(self.globs, self.text_fields, self.shuffle_buffer, self.max_docs):
             ids = self.tok.encode(_norm(text))
-            if len(ids) < self.min_len: continue
+            if len(ids) < self.min_len:
+                continue
             if not self.pack:
                 ids = self.tok.pad(ids, self.max_len)
                 yield torch.tensor(ids, dtype=torch.long)
-                yielded += 1
             else:
-                # pack into contiguous chunks of max_len
-                cur.extend(ids + [self.tok.pad_id])  # use pad as separator
+                # pack into contiguous max_len windows using pad as a separator
+                cur.extend(ids + [self.tok.pad_id])
                 while len(cur) >= self.max_len:
                     chunk = cur[:self.max_len]
                     cur = cur[self.max_len:]
                     yield torch.tensor(chunk, dtype=torch.long)
-                    yielded += 1
         if not self.pack and cur:
             ids = self.tok.pad(cur, self.max_len)
             yield torch.tensor(ids, dtype=torch.long)
-vvvvvvv
