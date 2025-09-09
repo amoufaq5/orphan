@@ -7,7 +7,7 @@ from .dataset import SFTIterable
 from ...utils.config import load_yaml
 from ...utils.logger import get_logger
 
-# Optional: keep CPU threads reasonable to prevent thrash
+# keep CPU threads reasonable
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 os.environ.setdefault("MKL_NUM_THREADS", "4")
 try:
@@ -29,7 +29,7 @@ def main():
 
     # tokenizer
     spm_path = cfg["sft"]["model"]["spm_model"]
-    tok = SentencePieceWrapper(spm_path, pad_id=0, unk_id=3)
+    tok = SentencePieceWrapper(spm_path, pad_id=None, unk_id=None)
 
     # data
     persona = cfg["sft"]["templates"]["persona"]
@@ -73,10 +73,9 @@ def main():
     warmup_ratio = float(opt_cfg.get("warmup_ratio",0.06))
     scheduler = CosineWithWarmup(optimizer, warmup_steps=int(total_steps*warmup_ratio), total_steps=total_steps)
 
-    # Modern AMP API (auto-disabled on CPU)
-    use_cuda = torch.cuda.is_available()
-    from torch.amp import GradScaler, autocast
-    scaler = GradScaler("cuda") if (use_cuda and bool(opt_cfg.get("amp", True))) else GradScaler(enabled=False)
+    # AMP (CUDA only); on CPU it will auto-disable and warn once
+    from torch.cuda.amp import GradScaler, autocast
+    scaler = GradScaler(enabled=torch.cuda.is_available() and bool(opt_cfg.get("amp", True)))
 
     grad_accum = int(cfg["sft"]["data"].get("grad_accum", 1))
     max_norm = float(opt_cfg.get("max_grad_norm", 1.0))
@@ -106,7 +105,7 @@ def main():
         ids, labels = batch
         ids = ids.to(device)
         labels = labels.to(device)
-        with autocast("cuda", enabled=scaler.is_enabled()):
+        with autocast(enabled=scaler.is_enabled()):
             logits, _ = model(ids, labels=None)
             # shift one for teacher forcing
             logits = logits[:, :-1, :].contiguous().view(-1, logits.size(-1))
@@ -117,8 +116,10 @@ def main():
         running += loss.item()
 
         if (step+1) % grad_accum == 0:
-            if max_norm > 0:
-                scaler.unscale_gradients(optimizer)
+            if max_norm > 0 and scaler.is_enabled():
+                scaler.unscale_(optimizer)  # ✅ correct modern API
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            elif max_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
             scaler.step(optimizer)
             scaler.update()
