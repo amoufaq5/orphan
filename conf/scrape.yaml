@@ -1,22 +1,19 @@
 scrape:
   user_agent: "orphan-studio/0.1 (contact: ops@orphan.local)"
-  max_concurrency: 4
+  max_concurrency: 2
   request_timeout_sec: 30
-  connect_timeout_sec: 15
   total_retries: 5
   backoff_base_sec: 0.5
   backoff_max_sec: 8
   rate:
-    # polite global rate ~3 req/s; source-specific buckets later
     requests_per_second: 3
     burst: 3
   paging:
-    max_pages_per_source: 50
+    max_pages_per_source: 2        # ← small for first batch
   caps:
-    max_docs_per_source: 200000
+    max_docs_per_source: 1000      # ← small for first batch (per source)
   shards:
-    max_records_per_shard: 5000
-  # Keys are read from env when present
+    max_records_per_shard: 1000
   keys:
     pubmed_api_key: "${PUBMED_API_KEY:-}"
     openfda_api_key: "${OPENFDA_API_KEY:-}"
