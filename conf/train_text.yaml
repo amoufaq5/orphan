@@ -1,31 +1,24 @@
 train:
   tokenizer:
     vocab_size: 52000
-    min_freq: 2             # used by HF tokenizers path; SPM ignores and uses character coverage
-    model_type: spm_unigram # choices: spm_unigram | spm_bpe | hf_bpe_byte
-    character_coverage: 0.9995  # good for EN+AR mix
+    min_freq: 2
+    model_type: spm_unigram
+    character_coverage: 0.9995
     byte_fallback: true
     lowercase: false
-    normalization: "NFKC"   # applied in corpus builder
-    special_tokens:
-      - "<pad>"
-      - "<s>"
-      - "</s>"
-      - "<unk>"
-      - "<triage>"
-      - "<referral>"
-      - "<cite>"
-      - "<arabic>"
-      - "<english>"
+    normalization: "NFKC"
+    special_tokens: ["<pad>", "<s>", "</s>", "<unk>", "<triage>", "<referral>", "<cite>", "<arabic>", "<english>"]
+
   textlm:
     model_dim: 768
     n_layers: 16
     n_heads: 12
     ffn_mult: 4
-    norm: "rms"
+    norm: "rms"         # "rms" | "layernorm"
     rope: true
     context_len: 8192
     dropout: 0.1
+
   optimization:
     batch_size: 16
     grad_accum: 2
@@ -33,17 +26,28 @@ train:
     weight_decay: 0.05
     warmup_ratio: 0.06
     epochs: 3
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+    max_grad_norm: 1.0
+    amp: true
+    seed: 1337
+
   data:
-    # use enriched labels + canonical text by default
     train_glob: "data/canonical/canonical*.jsonl"
     eval_ratio: 0.01
-  tokenizer_corpus:
-    # where to read text from and how to build a flat corpus file for SPM/HF
-    input_globs:
-      - "data/canonical/canonical*.jsonl"
-    include_types: ["article", "drug_label", "trial"]   # filter by CanonicalDoc.type
-    max_docs: 100000            # safety cap for first run; raise later
-    output_txt: "out/tokenizer/corpus.txt"
-    dedupe_by_hash: true        # dedupe identical section texts
-    arabic_hint_token: "<arabic>"
-    english_hint_token: "<english>"
+    min_seq_len: 16
+    max_seq_len: 8192
+    text_fields: ["sections.body"]   # dot-paths inside CanonicalDoc rows
+    shuffle_buffer: 20000            # lines buffered before shuffle
+    pack_sequences: true             # efficient packing into full context windows
+
+  io:
+    out_dir: "out/text_orphgpt"
+    save_every_steps: 1000
+    eval_every_steps: 1000
+    log_every_steps: 100
+    keep_last_n: 3
+
+  tokenizer_files:
+    spm_model: "out/tokenizer/orph_spm.model"   # produced by train_tokenizer_spm.py
+    special_tokens: ["<pad>", "<s>", "</s>", "<unk>", "<triage>", "<referral>", "<cite>", "<arabic>", "<english>"]
