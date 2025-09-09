@@ -21,13 +21,23 @@ def main():
 
     # tokenizer
     spm_path = cfg["sft"]["model"]["spm_model"]
-    tok = SentencePieceWrapper(spm_path, pad_id=0, unk_id=3)
+    tok = SentencePieceWrapper(spm_path)
 
     # data
     persona = cfg["sft"]["templates"]["persona"]
     enforce_citations = bool(cfg["sft"]["templates"].get("enforce_citations", True))
-    ds = SFTIterable(cfg["sft"]["data"]["train_path"], tok, cfg["sft"]["data"]["max_seq_len"], persona, enforce_citations)
-    loader = torch.utils.data.DataLoader(ds, batch_size=int(cfg["sft"]["data"]["batch_size"]), num_workers=0)
+    ds = SFTIterable(
+        cfg["sft"]["data"]["train_path"],
+        tok,
+        cfg["sft"]["data"]["max_seq_len"],
+        persona,
+        enforce_citations,
+    )
+    loader = torch.utils.data.DataLoader(
+        ds,
+        batch_size=int(cfg["sft"]["data"]["batch_size"]),
+        num_workers=0,
+    )
 
     # model (init from pretrain if provided)
     ckpt_in = cfg["sft"]["model"].get("ckpt_in")
@@ -59,13 +69,19 @@ def main():
 
     # opt/sched
     opt_cfg = cfg["sft"]["optimization"]
-    optimizer = torch.optim.AdamW(model.parameters(),
-                                  lr=float(opt_cfg["lr"]),
-                                  weight_decay=float(opt_cfg["weight_decay"]),
-                                  betas=tuple(opt_cfg.get("betas",[0.9,0.95])))
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(opt_cfg["lr"]),
+        weight_decay=float(opt_cfg["weight_decay"]),
+        betas=tuple(opt_cfg.get("betas",[0.9,0.95])),
+    )
     total_steps = int(opt_cfg.get("epochs",1) * 100000)  # rough placeholder
     warmup_ratio = float(opt_cfg.get("warmup_ratio",0.06))
-    scheduler = CosineWithWarmup(optimizer, warmup_steps=int(total_steps*warmup_ratio), total_steps=total_steps)
+    scheduler = CosineWithWarmup(
+        optimizer,
+        warmup_steps=int(total_steps*warmup_ratio),
+        total_steps=total_steps,
+    )
     scaler = torch.cuda.amp.GradScaler(enabled=bool(opt_cfg.get("amp", True)))
     grad_accum = int(cfg["sft"]["data"].get("grad_accum", 1))
     max_norm = float(opt_cfg.get("max_grad_norm", 1.0))
@@ -100,7 +116,9 @@ def main():
             # shift one for teacher forcing
             logits = logits[:, :-1, :].contiguous().view(-1, logits.size(-1))
             target = labels[:, 1:].contiguous().view(-1)
-            loss = torch.nn.functional.cross_entropy(logits, target, ignore_index=-100)
+            loss = torch.nn.functional.cross_entropy(
+                logits, target, ignore_index=-100
+            )
         loss = loss / grad_accum
         scaler.scale(loss).backward()
         running += loss.item()
@@ -122,14 +140,17 @@ def main():
 
         if step % save_every == 0 and step > 0:
             path = os.path.join(out_dir, f"sft_step_{step}.pt")
-            save_checkpoint(path, {
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "scheduler": scheduler.state_dict(),
-                "step": step,
-                "best": best,
-                "cfg": cfg,
-            })
+            save_checkpoint(
+                path,
+                {
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "step": step,
+                    "best": best,
+                    "cfg": cfg,
+                },
+            )
             # prune old
             snaps = sorted(glob.glob(os.path.join(out_dir, "sft_step_*.pt")), key=os.path.getmtime)
             if len(snaps) > keep_n:
