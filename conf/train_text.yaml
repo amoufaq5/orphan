@@ -37,6 +37,14 @@ train:
     warmup_ratio: 0.06
     epochs: 3
 
+
+  io:                                  # <<=== this is missing in your file
+    out_dir: "out/text_orphgpt"
+    save_every_steps: 1000
+    eval_every_steps: 1000
+    log_every_steps: 100
+    keep_last_n: 3
+
   data:
     train_glob: "data/canonical/canonical*.jsonl"
     eval_ratio: 0.01
