@@ -1,0 +1,13 @@
+data:
+  raw_dir: "data/raw"
+  cleaned_dir: "data/cleaned"
+  canonical_dir: "data/canonical"
+  shards_dir: "data/shards"
+  shard_max_records: 5000
+  jsonl_indent: 0
+  orjson: true
+
+provenance:
+  include_source_url: true
+  include_retrieved_at: true
+  include_license: true
