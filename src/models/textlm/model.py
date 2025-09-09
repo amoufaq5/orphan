@@ -14,18 +14,20 @@ class RMSNorm(nn.Module):
         return _rms_norm(x, self.weight, self.eps)
 
 class RotaryPositionalEmbedding:
-    """RoPE helper for Q/K."""
-    def __init__(self, dim: int, max_seq_len: int, base: float = 10000.0):
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+    """RoPE cached for a given head_dim."""
+    def __init__(self, head_dim: int, max_seq_len: int, base: float = 10000.0):
+        assert head_dim % 2 == 0, "head_dim must be even for RoPE."
+        inv = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
         t = torch.arange(max_seq_len, dtype=torch.float)
-        freqs = torch.einsum("i,j->ij", t, inv_freq)  # [T, dim/2]
-        emb = torch.cat((freqs, freqs), dim=-1)       # [T, dim]
-        self.cos_cached = emb.cos()[None, None, :, :] # [1,1,T,dim]
-        self.sin_cached = emb.sin()[None, None, :, :] # [1,1,T,dim]
+        freqs = torch.einsum("i,j->ij", t, inv)  # [T, head_dim/2]
+        emb = torch.cat((freqs, freqs), dim=-1)  # [T, head_dim]
+        self.cos = emb.cos()[None, None, :, :]   # [1,1,T,head_dim]
+        self.sin = emb.sin()[None, None, :, :]   # [1,1,T,head_dim]
 
     def apply(self, x: torch.Tensor, seq_len: int) -> torch.Tensor:
-        cos = self.cos_cached[..., :seq_len, :].to(x.device, x.dtype)
-        sin = self.sin_cached[..., :seq_len, :].to(x.device, x.dtype)
+        # x: [B,h,T,head_dim]
+        cos = self.cos[..., :seq_len, :].to(x.device, x.dtype)
+        sin = self.sin[..., :seq_len, :].to(x.device, x.dtype)
         x1, x2 = x[..., ::2], x[..., 1::2]
         x_rot = torch.stack((-x2, x1), dim=-1).reshape_as(x)
         return (x * cos) + (x_rot * sin)
@@ -42,7 +44,7 @@ class MLP(nn.Module):
         return self.drop(self.fc2(self.act(self.fc1(x))))
 
 class Attention(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float, rope: Optional[RotaryPositionalEmbedding] = None):
+    def __init__(self, d_model: int, n_heads: int, dropout: float, use_rope: bool, max_seq_len: int):
         super().__init__()
         assert d_model % n_heads == 0
         self.n_heads = n_heads
@@ -50,7 +52,7 @@ class Attention(nn.Module):
         self.qkv = nn.Linear(d_model, d_model * 3, bias=False)
         self.proj = nn.Linear(d_model, d_model, bias=False)
         self.drop = nn.Dropout(dropout)
-        self.rope = rope
+        self.rope = RotaryPositionalEmbedding(self.head_dim, max_seq_len) if use_rope else None
 
     def forward(self, x, attn_mask=None):
         B, T, C = x.size()
@@ -59,8 +61,8 @@ class Attention(nn.Module):
         if self.rope is not None:
             q = self.rope.apply(q, T)
             k = self.rope.apply(k, T)
-        att = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        if attn_mask is not None:  # causal mask
+        att = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)  # [B,h,T,T]
+        if attn_mask is not None:
             att = att.masked_fill(attn_mask == 0, float("-inf"))
         att = torch.softmax(att, dim=-1)
         att = self.drop(att)
@@ -69,10 +71,10 @@ class Attention(nn.Module):
         return self.drop(self.proj(y))
 
 class Block(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, ffn_mult: int, dropout: float, norm_type: str, rope: Optional[RotaryPositionalEmbedding]):
+    def __init__(self, d_model: int, n_heads: int, ffn_mult: int, dropout: float, norm_type: str, use_rope: bool, max_seq_len: int):
         super().__init__()
         self.norm1 = RMSNorm(d_model) if norm_type == "rms" else nn.LayerNorm(d_model)
-        self.attn = Attention(d_model, n_heads, dropout, rope)
+        self.attn = Attention(d_model, n_heads, dropout, use_rope, max_seq_len)
         self.norm2 = RMSNorm(d_model) if norm_type == "rms" else nn.LayerNorm(d_model)
         self.mlp = MLP(d_model, ffn_mult, dropout)
     def forward(self, x, attn_mask=None):
@@ -87,11 +89,12 @@ class OrphGPT(nn.Module):
         self.tok_emb = nn.Embedding(vocab_size, d_model)
         self.pos_emb = None if use_rope else nn.Embedding(max_seq_len, d_model)
         self.dropout = nn.Dropout(dropout)
-        rope = RotaryPositionalEmbedding(d_model, max_seq_len) if use_rope else None
-        self.blocks = nn.ModuleList([Block(d_model, n_heads, ffn_mult, dropout, norm_type, rope) for _ in range(n_layers)])
+        self.blocks = nn.ModuleList([
+            Block(d_model, n_heads, ffn_mult, dropout, norm_type, use_rope, max_seq_len)
+            for _ in range(n_layers)
+        ])
         self.norm = RMSNorm(d_model) if norm_type == "rms" else nn.LayerNorm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
-
         self.max_seq_len = max_seq_len
         self.apply(self._init_weights)
 
@@ -109,7 +112,6 @@ class OrphGPT(nn.Module):
             pos = torch.arange(T, device=idx.device).unsqueeze(0)
             x = x + self.pos_emb(pos)
         x = self.dropout(x)
-        # causal mask (1=keep, 0=mask)
         if attn_mask is None:
             attn_mask = torch.tril(torch.ones((T, T), device=idx.device)).unsqueeze(0).unsqueeze(0)  # [1,1,T,T]
         for blk in self.blocks:
@@ -118,7 +120,9 @@ class OrphGPT(nn.Module):
         logits = self.lm_head(x)
         loss = None
         if labels is not None:
-            loss = nn.functional.cross_entropy(logits[:, :-1, :].contiguous().view(-1, self.vocab_size),
-                                               labels[:, 1:].contiguous().view(-1),
-                                               ignore_index=-100)
+            loss = nn.functional.cross_entropy(
+                logits[:, :-1, :].contiguous().view(-1, self.vocab_size),
+                labels[:, 1:].contiguous().view(-1),
+                ignore_index=-100
+            )
         return logits, loss
