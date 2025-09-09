@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.env
+.env.*
+
+# Data
+data/raw/
+data/cleaned/
+data/canonical/
+data/shards/
+data/tmp/
+
+# Models & outputs
+out/
+runs/
+checkpoints/
+wandb/
+mlruns/
+
+# OS/IDE
+.DS_Store
+.vscode/
+.idea/
