@@ -1,11 +1,22 @@
 train:
   tokenizer:
     vocab_size: 52000
-    min_freq: 2
-    model_type: bpe
-    lowercase: false
+    min_freq: 2             # used by HF tokenizers path; SPM ignores and uses character coverage
+    model_type: spm_unigram # choices: spm_unigram | spm_bpe | hf_bpe_byte
+    character_coverage: 0.9995  # good for EN+AR mix
     byte_fallback: true
-    special_tokens: ["<pad>", "<s>", "</s>", "<unk>"]
+    lowercase: false
+    normalization: "NFKC"   # applied in corpus builder
+    special_tokens:
+      - "<pad>"
+      - "<s>"
+      - "</s>"
+      - "<unk>"
+      - "<triage>"
+      - "<referral>"
+      - "<cite>"
+      - "<arabic>"
+      - "<english>"
   textlm:
     model_dim: 768
     n_layers: 16
@@ -23,5 +34,16 @@ train:
     warmup_ratio: 0.06
     epochs: 3
   data:
-    train_glob: "data/canonical/*.jsonl"
+    # use enriched labels + canonical text by default
+    train_glob: "data/canonical/canonical*.jsonl"
     eval_ratio: 0.01
+  tokenizer_corpus:
+    # where to read text from and how to build a flat corpus file for SPM/HF
+    input_globs:
+      - "data/canonical/canonical*.jsonl"
+    include_types: ["article", "drug_label", "trial"]   # filter by CanonicalDoc.type
+    max_docs: 100000            # safety cap for first run; raise later
+    output_txt: "out/tokenizer/corpus.txt"
+    dedupe_by_hash: true        # dedupe identical section texts
+    arabic_hint_token: "<arabic>"
+    english_hint_token: "<english>"
