@@ -1,0 +1,27 @@
+train:
+  tokenizer:
+    vocab_size: 52000
+    min_freq: 2
+    model_type: bpe
+    lowercase: false
+    byte_fallback: true
+    special_tokens: ["<pad>", "<s>", "</s>", "<unk>"]
+  textlm:
+    model_dim: 768
+    n_layers: 16
+    n_heads: 12
+    ffn_mult: 4
+    norm: "rms"
+    rope: true
+    context_len: 8192
+    dropout: 0.1
+  optimization:
+    batch_size: 16
+    grad_accum: 2
+    lr: 3.0e-4
+    weight_decay: 0.05
+    warmup_ratio: 0.06
+    epochs: 3
+  data:
+    train_glob: "data/canonical/*.jsonl"
+    eval_ratio: 0.01
