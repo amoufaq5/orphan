@@ -36,19 +36,18 @@ def enrich_dir(canonical_dir: str, out_dir: str, shard_max: int = 5000):
         for row in read_jsonl(fp):
             cdoc = _to_canonical(row)
             if cdoc.type != "drug_label":
-                # pass-through non labels
-                write(orjson.dumps(row))
+                # pass-through non labels (PASS A DICT, NOT BYTES)
+                write(row)  # <-- changed from write(orjson.dumps(row))
                 total += 1
                 continue
 
             # extract structured sections if raw meta existed upstream
             meta = (row.get("meta") or {})
-            # we stored source & raw at RawDoc stage; propagate lightly if available
-            # if missing, we keep the original sections
             structured = split_drug_label(meta) if meta else {}
             if structured:
                 cdoc.sections = structured
-            # dump
+
+            # write CanonicalDoc as dict
             write(orjson.loads(cdoc.model_dump_json()))
             total += 1
 
