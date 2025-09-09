@@ -1,6 +1,9 @@
+# src/scrapers/clinicaltrials.py
 from __future__ import annotations
+
 import datetime as dt
-from typing import Any, Dict, Iterable, List, Tuple, Optional
+from typing import Any, Dict, List, Optional
+
 from .base_scraper import BaseScraper, ScrapeResult
 from .registry import register
 from ..utils.logger import get_logger
@@ -10,35 +13,45 @@ log = get_logger("ctgov")
 
 API_V2 = "https://clinicaltrials.gov/api/v2/studies"
 
-# v2 uses dotted field paths. We select a tight set analogous to v1 Study Fields.
-FIELDS = [
-    "protocolSection.identificationModule.nctId",
-    "protocolSection.identificationModule.briefTitle",
-    "protocolSection.identificationModule.officialTitle",
-    "protocolSection.statusModule.overallStatus",
-    "protocolSection.conditionsModule.conditions",
-    "protocolSection.designModule.phase",
-    "protocolSection.designModule.studyType",
-    "protocolSection.eligibilityModule.eligibilityCriteria",
-    "protocolSection.armsInterventionsModule.interventions",
-    "protocolSection.outcomesModule.primaryOutcomes",
-    "protocolSection.outcomesModule.secondaryOutcomes",
-    "protocolSection.contactsLocationsModule.locations",
-    "protocolSection.sponsorCollaboratorsModule.leadSponsor.name",
-    "protocolSection.sponsorCollaboratorsModule.collaborators.name",
-    "protocolSection.statusModule.studyFirstPostDateStruct.date",
-    "protocolSection.statusModule.lastUpdateSubmitDateStruct.date",
-    "resultsSection.publicationsModule.publications",
-]
+
+def _get(d: Dict[str, Any], path: str, default=None):
+    """
+    Safe nested getter: _get(obj, "a.b[0].c").
+    Supports simple dotted paths and list indices in square brackets.
+    """
+    cur: Any = d
+    for part in path.split("."):
+        if not part:
+            return default
+        if "[" in part and part.endswith("]"):
+            # e.g., "items[0]"
+            name, idx_str = part[:-1].split("[", 1)
+            if name:
+                if not isinstance(cur, dict) or name not in cur:
+                    return default
+                cur = cur.get(name)
+            try:
+                idx = int(idx_str)
+            except ValueError:
+                return default
+            if not isinstance(cur, list) or not (0 <= idx < len(cur)):
+                return default
+            cur = cur[idx]
+        else:
+            if not isinstance(cur, dict) or part not in cur:
+                return default
+            cur = cur.get(part)
+    return cur if cur is not None else default
+
 
 @register("clinicaltrials")
 class ClinicalTrialsGovScraper(BaseScraper):
     """
-    ClinicalTrials.gov API v2:
-      - Endpoint: /api/v2/studies
-      - Pagination: pageToken
-      - Params: pageSize (<= 1000), format=json, countTotal=true
-      - Query: e.g., query.term="*" or query.cond="Diabetes"
+    ClinicalTrials.gov API v2 scraper.
+    - Endpoint: /api/v2/studies
+    - Pagination: nextPageToken
+    - Params used: pageSize (<= 1000), format=json, countTotal=true
+    - Query: dict of v2 query params, default {"query.term": "*"}
     """
 
     name = "clinicaltrials"
@@ -46,9 +59,9 @@ class ClinicalTrialsGovScraper(BaseScraper):
     def __init__(
         self,
         *args,
-        query: Optional[Dict[str, str]] = None,   # e.g., {"query.term":"*"} or {"query.cond":"Diabetes"}
+        query: Optional[Dict[str, str]] = None,   # e.g., {"query.cond": "Diabetes"} or {"query.term": "*"}
         page_size: int = 200,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.query = query or {"query.term": "*"}
@@ -56,6 +69,7 @@ class ClinicalTrialsGovScraper(BaseScraper):
 
     async def run(self) -> ScrapeResult:
         from ..utils.io import shard_writer
+
         write, close = shard_writer(self.shards_dir, f"{self.name}", self.shard_max_records)
 
         fetched = 0
@@ -69,22 +83,18 @@ class ClinicalTrialsGovScraper(BaseScraper):
                     "pageSize": self.page_size,
                     "format": "json",
                     "countTotal": "true",
-                    "fields": ",".join(FIELDS),
                 }
                 if page_token:
                     params["pageToken"] = page_token
 
-                self.bucket.take(1)
-                r = await client.get(API_V2, params=params)
-                if r.status_code == 404:
-                    # Helpful message if site is in transition or fields invalid
-                    msg = f"[clinicaltrials] 404 from v2 endpoint. Params={params}"
-                    log.error(msg)
-                    r.raise_for_status()
-                r.raise_for_status()
-                payload = r.json()
+                # Polite rate limit handled in BaseScraper._get_json via TokenBucket
+                payload = await self._get_json(client, API_V2, params)
 
                 studies = payload.get("studies") or []
+                if not studies:
+                    log.info("[clinicaltrials] No studies returned; stopping.")
+                    break
+
                 for row in studies:
                     doc = self._row_to_rawdoc(row)
                     write(doc.model_dump(mode="json"))
@@ -92,52 +102,109 @@ class ClinicalTrialsGovScraper(BaseScraper):
                     if fetched >= self.max_docs:
                         break
 
+                if fetched >= self.max_docs:
+                    break
+
                 page += 1
                 page_token = payload.get("nextPageToken")
-                if not page_token or not studies:
+                if not page_token:
                     break
 
         close()
         return ScrapeResult(fetched, self.shards_dir)
 
     def _row_to_rawdoc(self, row: Dict[str, Any]) -> RawDoc:
-        ps = row.get("protocolSection", {})
-        ident = ps.get("identificationModule", {})
-        status = ps.get("statusModule", {})
-        cond = ps.get("conditionsModule", {})
-        design = ps.get("designModule", {})
-        elig  = ps.get("eligibilityModule", {})
-        arms  = ps.get("armsInterventionsModule", {})
-        outs  = ps.get("outcomesModule", {})
-        locs  = ps.get("contactsLocationsModule", {})
-        spons = ps.get("sponsorCollaboratorsModule", {})
+        # Extract commonly used fields safely
+        nctid: Optional[str] = _get(row, "protocolSection.identificationModule.nctId")
+        title: Optional[str] = (
+            _get(row, "protocolSection.identificationModule.officialTitle")
+            or _get(row, "protocolSection.identificationModule.briefTitle")
+        )
 
-        nctid  = ident.get("nctId")
-        title  = ident.get("officialTitle") or ident.get("briefTitle")
-        overall_status = status.get("overallStatus")
+        overall_status: Optional[str] = _get(row, "protocolSection.statusModule.overallStatus")
+        phase: Optional[str] = _get(row, "protocolSection.designModule.phase")
+        study_type: Optional[str] = _get(row, "protocolSection.designModule.studyType")
 
-        # Flatten interventions (names)
-        inter_names: List[str] = []
-        for it in arms.get("interventions") or []:
-            name = it.get("name")
-            if isinstance(name, str) and name.strip():
-                inter_names.append(name.strip())
+        conditions: List[str] = _get(row, "protocolSection.conditionsModule.conditions", default=[]) or []
 
-        # Conditions (list of strings)
-        conditions = cond.get("conditions") or []
+        # Interventions: flatten names if present
+        interventions = _get(row, "protocolSection.armsInterventionsModule.interventions", default=[]) or []
+        intervention_names: List[str] = []
+        if isinstance(interventions, list):
+            for it in interventions:
+                name = (it or {}).get("name")
+                if isinstance(name, str) and name.strip():
+                    intervention_names.append(name.strip())
 
-                # Outcomes
-        prim = outs.get("primaryOutcomes") or []
-        prim_meas = [
-            o.get("measure")
-            for o in prim
-            if isinstance(o, dict) and o.get("measure")
-        ]
+        # Outcomes: lists of dicts -> take "measure"
+        prim_outs = _get(row, "protocolSection.outcomesModule.primaryOutcomes", default=[]) or []
+        prim_meas: List[str] = []
+        if isinstance(prim_outs, list):
+            for o in prim_outs:
+                m = (o or {}).get("measure")
+                if isinstance(m, str) and m.strip():
+                    prim_meas.append(m.strip())
 
-        sec = outs.get("secondaryOutcomes") or []
-        sec_meas = [
-            o.get("measure")
-            for o in sec
-            if isinstance(o, dict) and o.get("measure")
-        ]
+        sec_outs = _get(row, "protocolSection.outcomesModule.secondaryOutcomes", default=[]) or []
+        sec_meas: List[str] = []
+        if isinstance(sec_outs, list):
+            for o in sec_outs:
+                m = (o or {}).get("measure")
+                if isinstance(m, str) and m.strip():
+                    sec_meas.append(m.strip())
 
+        eligibility_txt: Optional[str] = _get(row, "protocolSection.eligibilityModule.eligibilityCriteria")
+        if isinstance(eligibility_txt, str):
+            eligibility_txt = eligibility_txt.strip() or None
+        else:
+            eligibility_txt = None
+
+        # Compose a readable body
+        parts: List[str] = []
+        if overall_status:
+            parts.append(f"Status: {overall_status}")
+        if phase:
+            parts.append(f"Phase: {phase}")
+        if study_type:
+            parts.append(f"Type: {study_type}")
+        if conditions:
+            parts.append("Conditions: " + "; ".join(conditions))
+        if intervention_names:
+            parts.append("Interventions: " + "; ".join(intervention_names))
+        if prim_meas:
+            parts.append("Primary Outcomes: " + "; ".join(prim_meas))
+        if sec_meas:
+            parts.append("Secondary Outcomes: " + "; ".join(sec_meas))
+        if eligibility_txt:
+            parts.append("Eligibility:\n" + eligibility_txt)
+
+        text = "\n\n".join(parts) if parts else None
+
+        prov = Provenance(
+            source="clinicaltrials",
+            source_url=f"https://clinicaltrials.gov/study/{nctid}" if nctid else "https://clinicaltrials.gov/",
+            license="ClinicalTrials.gov API v2 terms",
+            retrieved_at=dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            hash=None,
+        )
+
+        return RawDoc(
+            id=f"ctgov:{nctid}" if nctid else f"ctgov:auto:{abs(hash(str(row)))%10**12}",
+            title=title,
+            text=text,
+            meta={
+                "type": "trial",
+                "nctid": nctid,
+                "status": overall_status,
+                "conditions": conditions,
+                "intervention_names": intervention_names,
+                "phase": phase,
+                "study_type": study_type,
+                "eligibility": eligibility_txt,
+                "primary_outcomes": prim_meas,
+                "secondary_outcomes": sec_meas,
+                "lang": "en",
+                "raw": row,  # keep full raw for downstream enrichment
+            },
+            prov=prov,
+        )
