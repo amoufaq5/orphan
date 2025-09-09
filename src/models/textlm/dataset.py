@@ -7,20 +7,23 @@ from ...utils.logger import get_logger
 log = get_logger("text-ds")
 
 class SentencePieceWrapper:
-    def __init__(self, spm_model_path: str):
+    def __init__(self, spm_model_path: str, pad_id: int | None = None, unk_id: int | None = None):
         import sentencepiece as spm
         self.proc = spm.SentencePieceProcessor()
         self.proc.Load(spm_model_path)
-        # read true IDs from the model
-        self.pad_id = self.proc.pad_id() if hasattr(self.proc, "pad_id") else self.proc.PieceToId("<pad>")
-        self.unk_id = self.proc.unk_id() if hasattr(self.proc, "unk_id") else self.proc.PieceToId("<unk>")
-        if self.pad_id < 0:
-            self.pad_id = self.proc.PieceToId("<pad>")
 
-    def encode(self, s: str) -> List[int]:
+        # auto-detect ids if not provided
+        self.pad_id = pad_id if pad_id is not None else self.proc.PieceToId("<pad>")
+        self.unk_id = unk_id if unk_id is not None else self.proc.PieceToId("<unk>")
+
+        # fallback defaults if tokens not found
+        if self.pad_id < 0: self.pad_id = 0
+        if self.unk_id < 0: self.unk_id = 3
+
+    def encode(self, s: str) -> list[int]:
         return self.proc.EncodeAsIds(s)
 
-    def pad(self, ids: List[int], length: int) -> List[int]:
+    def pad(self, ids: list[int], length: int) -> list[int]:
         if len(ids) >= length:
             return ids[:length]
         return ids + [self.pad_id] * (length - len(ids))
