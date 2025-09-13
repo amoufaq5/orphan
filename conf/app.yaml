@@ -1,8 +1,3 @@
-
----
-
-### `conf/app.yaml`
-```yaml
 app:
   name: orphan-studio
   env: dev
@@ -11,23 +6,24 @@ app:
     host: 0.0.0.0
     port: 8000
     workers: 1
-    cors_origins: ["*"]
-
-# NEW:
-model_runtime:
-  spm_model: "out/tokenizer/orph_spm.model"
-  sft_checkpoint: "out/sft_orphgpt/sft_step_1000.pt"   # update to your best SFT checkpoint
-  max_seq_len: 1024
-  max_new_tokens: 256
-  temperature: 0.8
-  top_p: 0.9
-  persona: "doctor"      # default persona for /generate; can override per-request
+    cors_origins:
+      - "*"
 
 security:
   jwt_secret: "CHANGE_ME_IN_ENV"
   jwt_algorithm: HS256
   token_ttl_minutes: 120
+
 audit:
   enabled: true
   sink: "file"
   path: "out/audit.log"
+
+model_runtime:
+  spm_model: "out/tokenizer/orph_spm.model"
+  sft_checkpoint: "out/sft_orphgpt/sft_step_1000.pt"  # <-- set to an existing .pt file
+  max_seq_len: 1024
+  max_new_tokens: 256
+  temperature: 0.8
+  top_p: 0.9
+  persona: "doctor"
