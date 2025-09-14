@@ -1,9 +1,12 @@
-from .registry import register, get_scraper, list_scrapers  # re-export
-# existing scrapers:
-from .dailymed import DailyMedSPLScraper  # noqa: F401
-from .openfda_labels import OpenFDALabelsScraper  # noqa: F401
-from .pubmed import PubMedAbstractsScraper  # noqa: F401
-from .pmc_oa import PMCOpenAccessScraper  # noqa: F401
+# src/scrapers/__init__.py
+"""
+Lightweight init for the scrapers package.
 
-# NEW:
-from .clinicaltrials import ClinicalTrialsGovScraper  # noqa: F401
+Avoid importing submodules here to prevent import-time failures
+when optional dependencies or legacy symbols are missing.
+Access submodules directly, e.g.:
+  from src.scrapers.ctgov import fetch_term as ctgov_fetch_term
+  from src.scrapers.pubmed import fetch_term as pubmed_fetch_term
+"""
+
+__all__ = []  # keep empty; no side-effect imports
