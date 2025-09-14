@@ -32,7 +32,8 @@ def _dotget(d: Dict[str, Any], path: str) -> str | None:
 
 def _chunk(text: str, max_len: int, overlap: int) -> List[str]:
     text = (text or "").strip()
-    if not text: return []
+    if not text:
+        return []
     words = text.split()
     chunks, i = [], 0
     while i < len(words):
@@ -47,7 +48,7 @@ def _collect_passages(files: List[str], include_types: List[str], section_keys: 
     out: List[Passage] = []
     for fp in files:
         for row in read_jsonl(fp):
-            typ = str(row.get("type","")).lower()
+            typ = str(row.get("type", "")).lower()
             if include_types and typ not in include_types:
                 continue
             title = row.get("title")
@@ -56,7 +57,8 @@ def _collect_passages(files: List[str], include_types: List[str], section_keys: 
             did = row.get("id")
             for key in section_keys:
                 txt = _dotget(row, key)
-                if not txt: continue
+                if not txt:
+                    continue
                 for i, ch in enumerate(_chunk(txt, max_len=max_len, overlap=overlap)):
                     pid = f"{did}::{key}::{i:04d}"
                     out.append(Passage(pid=pid, doc_id=did, title=title, text=ch, source_url=src_url, meta={"section": key, "prov": prov, "type": typ}))
@@ -79,23 +81,19 @@ def build_index(cfg_path: str, out_path: str | None = None):
         return
     texts = [p.text for p in passages]
 
-    # bilingual-friendly TF-IDF: char+word n-grams, lowercase, minimal filtering
+    # TF-IDF setup (bilingual-friendly): word uni/bi-grams, light filtering
     vec = TfidfVectorizer(
         analyzer="word",
-        ngram_range=(1,2),
+        ngram_range=(1, 2),
         min_df=2,
         max_df=0.9,
         lowercase=True,
-        strip_accents=None
+        strip_accents=None,
     )
     X = vec.fit_transform(texts)
     X = normalize(X, norm="l2", copy=False)
 
-    index = {
-        "vectorizer": vec,
-        "matrix": X,    # scipy CSR
-        "passages": passages,
-    }
+    index = {"vectorizer": vec, "matrix": X, "passages": passages}
     out_path = out_path or app["rag"]["index_path"]
     ensure_dir(os.path.dirname(out_path))
     with open(out_path, "wb") as f:
@@ -107,13 +105,27 @@ def load_index(path: str):
         return pickle.load(f)
 
 def search(index, query: str, top_k: int = 5) -> List[Tuple[Passage, float]]:
+    """
+    Rank by cosine, then de-duplicate by (doc_id, section) so we don't return
+    many near-identical chunks from the same page/section.
+    """
     vec = index["vectorizer"]
     M = index["matrix"]
     q = vec.transform([query])
     q = normalize(q, norm="l2", copy=False)
     sims = (M @ q.T).toarray().ravel()
-    if top_k <= 0: top_k = 5
-    idx = np.argpartition(-sims, min(top_k, len(sims)-1))[:top_k]
-    idx = idx[np.argsort(-sims[idx])]
-    hits = [(index["passages"][i], float(sims[i])) for i in idx]
+
+    order = np.argsort(-sims)  # descending
+    seen: set[tuple[str, str | None]] = set()
+    hits: List[Tuple[Passage, float]] = []
+    limit = max(1, top_k)
+    for i in order:
+        p: Passage = index["passages"][i]
+        key = (p.doc_id, p.meta.get("section"))
+        if key in seen:
+            continue
+        seen.add(key)
+        hits.append((p, float(sims[i])))
+        if len(hits) >= limit:
+            break
     return hits
