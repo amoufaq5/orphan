@@ -43,3 +43,29 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# src/scrapers/run.py (snippet for clinicaltrials)
+from src.scrapers.ctgov import fetch_term
+from src.scrapers.http import make_session
+from src.utils.logger import get_logger
+import yaml, os
+
+log = get_logger("scrape-runner")
+
+def run_ctgov(conf):
+    out = conf.get("out", "./data/raw/clinicaltrials")
+    page_size = conf.get("page_size", 25)
+    max_pages = conf.get("max_pages", 40)
+    status_filter = conf.get("status_filter")  # e.g., "Recruiting"
+    terms = conf["disease_terms"]              # list of strings
+
+    session = make_session()
+    total = 0
+    for t in terms:
+        saved = fetch_term(
+            t, out_dir=out, page_size=page_size,
+            max_pages=max_pages, status_filter=status_filter,
+            session=session
+        )
+        total += saved
+    log.info(f"[ctgov] DONE. Total studies saved: {total}")
