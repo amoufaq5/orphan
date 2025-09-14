@@ -3,16 +3,10 @@ sources: [clinicaltrials]
 
 clinicaltrials:
   out: ./data/raw/clinicaltrials
-  page_size: 25          # how many studies per request
-  max_pages: 40          # cap to avoid runaway scraping
-  status_filter: Recruiting   # remove or set to null to include all statuses
-  # Option A: inline terms
+  page_size: 25           # v2 supports paging via pageSize + pageToken
+  max_pages: 40           # cap number of pages per term
+  status_filter: RECRUITING   # v2 prefers enums; e.g., RECRUITING, NOT_YET_RECRUITING, ACTIVE_NOT_RECRUITING
   disease_terms:
     - asthma
     - diabetes mellitus
     - breast cancer
-    - hypertension
-    - chronic kidney disease
-    - osteoporosis
-  # Option B: put terms in a separate file (one per line)
-  # disease_terms_file: conf/disease_terms.txt
