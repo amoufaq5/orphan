@@ -1,26 +1,94 @@
 asthma
-diabetes mellitus
+chronic obstructive pulmonary disease
 hypertension
-ischemic heart disease
+diabetes mellitus type 1
+diabetes mellitus type 2
+coronary artery disease
+heart failure
+atrial fibrillation
 stroke
-migraine
-depression
-anxiety
-osteoarthritis
+myocardial infarction
+hyperlipidemia
+obesity
+osteoporosis
 rheumatoid arthritis
+osteoarthritis
+systemic lupus erythematosus
+multiple sclerosis
+parkinson disease
+alzheimer disease
+epilepsy
+migraine
 chronic kidney disease
-copd
+end-stage renal disease
+chronic liver disease
+cirrhosis
+hepatitis B
+hepatitis C
+nonalcoholic fatty liver disease
+nonalcoholic steatohepatitis
+inflammatory bowel disease
+crohn disease
+ulcerative colitis
+irritable bowel syndrome
+gastroesophageal reflux disease
+peptic ulcer disease
+celiac disease
+pancreatitis
+hiv infection
 covid-19
 influenza
-hepatitis b
-hepatitis c
-hiv infection
+pneumonia
+tuberculosis
+malaria
+dengue
+sickle cell disease
+thalassemia
+iron deficiency anemia
+hemophilia
+acute myeloid leukemia
+acute lymphoblastic leukemia
+lymphoma
+multiple myeloma
 breast cancer
 lung cancer
 colorectal cancer
 prostate cancer
-leukemia
-lymphoma
-multiple sclerosis
-parkinson disease
-alzheimer disease
+pancreatic cancer
+gastric cancer
+hepatocellular carcinoma
+melanoma
+ovarian cancer
+cervical cancer
+endometrial cancer
+thyroid cancer
+glioblastoma
+brain tumor
+major depressive disorder
+bipolar disorder
+schizophrenia
+generalized anxiety disorder
+post-traumatic stress disorder
+autism spectrum disorder
+attention-deficit/hyperactivity disorder
+chronic pain
+neuropathic pain
+fibromyalgia
+psoriasis
+atopic dermatitis
+eczema
+acne
+pulmonary hypertension
+obstructive sleep apnea
+sepsis
+acute respiratory distress syndrome
+diabetic neuropathy
+diabetic retinopathy
+glaucoma
+cataract
+age-related macular degeneration
+infertility
+polycystic ovary syndrome
+endometriosis
+benign prostatic hyperplasia
+erectile dysfunction
