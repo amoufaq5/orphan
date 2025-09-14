@@ -51,47 +51,42 @@ DISEASE_TERMS: List[str] = [
     "psoriasis", "atopic dermatitis", "eczema", "acne vulgaris",
 ]
 
-# StudyFields we’ll fetch (extend if you need more)
+# Keep fields compact to reduce payload size and avoid API errors under slow links
 FIELDS = [
     "NCTId", "BriefTitle", "OfficialTitle", "OverallStatus",
     "Condition", "InterventionType", "InterventionName",
-    "EligibilityCriteria", "Phase", "StudyType",
-    "StudyFirstPostDate", "LastUpdateSubmitDate",
-    "LocationCountry", "LeadSponsorName", "CollaboratorName",
+    "Phase", "StudyType",
     "PrimaryOutcomeMeasure", "PrimaryOutcomeTimeFrame",
-    "SecondaryOutcomeMeasure", "SecondaryOutcomeTimeFrame",
-    "ResultsFirstPostDate",
+    "StudyFirstPostDate", "LastUpdateSubmitDate",
+    "LocationCountry", "LeadSponsorName",
 ]
 
 def _expr_for(term: str) -> str:
     """
-    Compose a broad ct.gov StudyFields expression for a disease term.
-    Matches in Condition/BriefTitle/OfficialTitle.
+    Compose a ClinicalTrials.gov StudyFields expression for a disease term.
+    Matches across Condition / BriefTitle / OfficialTitle for higher recall.
     """
     t = (term or "").strip()
     if not t:
         return "AREA[OverallStatus] *"
-    # Quote the term; OR across common fields for recall
     return f'(AREA[Condition] "{t}") OR (AREA[BriefTitle] "{t}") OR (AREA[OfficialTitle] "{t}")'
 
 @register("clinicaltrials")
 class ClinicalTrialsGovScraper(BaseScraper):
     """
-    ClinicalTrials.gov Study Fields scraper.
+    ClinicalTrials.gov Study Fields scraper with built-in disease sweep.
 
     Default behavior:
-      • Iterates over a built-in list of DISEASE_TERMS and queries each with a broad expression.
-      • Respects global paging/rate limits from conf/scrape.yaml (max_pages_per_source, etc.).
+      • Iterates DISEASE_TERMS and queries each broadly.
+      • Respects global rate/paging/retry settings from conf/scrape.yaml.
       • Emits RawDoc shards with provenance.
 
-    You can override defaults via YAML by passing kwargs for this scraper (if your
-    runner supports per-scraper kwargs), e.g.:
-      clinicaltrials:
-        page_size: 200
-        use_disease_list: true
-        disease_terms: ["your", "custom", "terms"]
-        expr: 'AREA[OverallStatus] Recruiting'          # overrides the list if set
-        expr_list: ['AREA[Condition] "migraine"', ...]  # explicit list of expressions
+    Overrides via kwargs (optional, if your runner supports per-scraper kwargs):
+      - expr: str                      # single StudyFields expression
+      - expr_list: List[str]           # multiple expressions
+      - use_disease_list: bool         # default True
+      - disease_terms: List[str]       # replace built-in list
+      - page_size: int                 # default 50 (polite)
     """
 
     name = "clinicaltrials"
@@ -101,15 +96,16 @@ class ClinicalTrialsGovScraper(BaseScraper):
         *args,
         expr: Optional[str] = None,
         expr_list: Optional[List[str]] = None,
-        page_size: int = 100,
+        page_size: int = 50,                 # ↓ gentler default (was 100)
         use_disease_list: bool = True,
         disease_terms: Optional[List[str]] = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.page_size = max(1, min(1000, page_size))
+        # Be polite: API allows up to 1000, we cap at 500 and default to 50
+        self.page_size = max(1, min(500, page_size))
 
-        # Priority of query sources:
+        # Query source priority:
         # 1) explicit expr_list
         # 2) single expr
         # 3) built-in disease list (default)
@@ -122,7 +118,6 @@ class ClinicalTrialsGovScraper(BaseScraper):
         else:
             terms = disease_terms if (use_disease_list and disease_terms) else (DISEASE_TERMS if use_disease_list else [])
             if not terms:
-                # If no terms and no expr provided, fall back to a broad catch-all
                 self.queries = ["AREA[OverallStatus] *"]
                 self.query_mode = "fallback_all"
             else:
@@ -131,10 +126,8 @@ class ClinicalTrialsGovScraper(BaseScraper):
 
         log.info(f"[ctgov] mode={self.query_mode} queries={len(self.queries)} page_size={self.page_size}")
 
-    # BaseScraper calls this to enumerate requests; we iterate our query list.
     def build_requests(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
         for q in self.queries:
-            # If we are using disease terms, transform to a StudyFields expr
             expr = _expr_for(q) if self.query_mode == "disease_terms" else q
             for p in range(self.max_pages):
                 start = p * self.page_size + 1
@@ -166,13 +159,10 @@ class ClinicalTrialsGovScraper(BaseScraper):
             conds  = many("Condition")
             inter_types = many("InterventionType")
             inter_names = many("InterventionName")
-            elig   = one("EligibilityCriteria")
             phase  = one("Phase")
             stype  = one("StudyType")
             p_out  = many("PrimaryOutcomeMeasure")
             p_tf   = many("PrimaryOutcomeTimeFrame")
-            s_out  = many("SecondaryOutcomeMeasure")
-            s_tf   = many("SecondaryOutcomeTimeFrame")
             first  = one("StudyFirstPostDate")
             upd    = one("LastUpdateSubmitDate")
             country= many("LocationCountry")
@@ -185,8 +175,8 @@ class ClinicalTrialsGovScraper(BaseScraper):
             if conds:  parts.append("Conditions: " + "; ".join(conds))
             if inter_names: parts.append("Interventions: " + "; ".join(inter_names))
             if p_out:  parts.append("Primary Outcomes: " + "; ".join(p_out))
-            if s_out:  parts.append("Secondary Outcomes: " + "; ".join(s_out))
-            if elig:   parts.append("Eligibility:\n" + elig)
+            if p_tf:   parts.append("Timeframes: " + "; ".join(p_tf))
+
             text = "\n\n".join(parts) if parts else None
 
             prov = Provenance(
@@ -206,8 +196,6 @@ class ClinicalTrialsGovScraper(BaseScraper):
                 "intervention_names": inter_names,
                 "primary_outcomes": p_out,
                 "primary_outcomes_timeframe": p_tf,
-                "secondary_outcomes": s_out,
-                "secondary_outcomes_timeframe": s_tf,
                 "phase": phase,
                 "study_type": stype,
                 "first_posted": first,
@@ -216,7 +204,6 @@ class ClinicalTrialsGovScraper(BaseScraper):
                 "lead_sponsor": sponsor,
                 "lang": "en",
                 "raw": row,
-                # Mark how this result was fetched to aid debugging/metrics:
                 "query_mode": getattr(self, "query_mode", None),
             }
 
