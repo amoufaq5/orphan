@@ -11,6 +11,8 @@ except Exception:
     print("YAML support required. Install with: pip install pyyaml", file=sys.stderr)
     raise
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from src.utils.logger import get_logger
 from src.scrapers.http import make_session
 from src.scrapers.ctgov import fetch_term as ctgov_fetch_term
@@ -18,9 +20,6 @@ from src.scrapers.ctgov import fetch_term as ctgov_fetch_term
 log = get_logger("scrape-runner")
 
 
-# ----------------------------
-# Config & CLI
-# ----------------------------
 def load_config(path: str) -> Dict[str, Any]:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Config not found: {path}")
@@ -34,69 +33,50 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--config", "-c", required=True, help="Path to scrape YAML config")
-    p.add_argument(
-        "--sources",
-        nargs="+",
-        required=True,
-        help="Which sources to run (e.g., clinicaltrials openfda pubmed)",
-    )
-    # Optional global overrides
-    p.add_argument("--only", nargs="+", help="Limit to these terms (override config list)")
-    p.add_argument("--max-terms", type=int, default=None, help="Cap number of terms to process")
-    p.add_argument("--page-size", type=int, default=None, help="Override page_size for sources that support it")
-    p.add_argument("--max-pages", type=int, default=None, help="Override max_pages for sources that support it")
+    p.add_argument("--sources", nargs="+", required=True, help="Sources to run (e.g., clinicaltrials)")
+    # Global overrides
+    p.add_argument("--only", nargs="+", help="Limit to these terms")
+    p.add_argument("--max-terms", type=int, default=None, help="Cap number of terms")
+    p.add_argument("--page-size", type=int, default=None, help="Override page_size")
+    p.add_argument("--max-pages", type=int, default=None, help="Override max_pages")
     p.add_argument("--status-filter", type=str, default=None, help="Override status filter (e.g., RECRUITING)")
-    p.add_argument("--dry-run", action="store_true", help="Parse and show plan without making network calls")
+    p.add_argument("--dry-run", action="store_true", help="Plan only; no network calls")
+    p.add_argument("--workers", type=int, default=2, help="Parallel workers (by term). Use 2–4 to stay polite.")
     return p.parse_args(argv)
 
 
-# ----------------------------
-# ClinicalTrials.gov (v2) runner
-# ----------------------------
+def _load_terms(src_conf: Dict[str, Any], overrides: argparse.Namespace) -> List[str]:
+    terms: List[str] = src_conf.get("disease_terms", []) or []
+    terms_file = src_conf.get("disease_terms_file")
+    if terms_file and os.path.exists(terms_file):
+        with open(terms_file, "r", encoding="utf-8") as f:
+            file_terms = [ln.strip() for ln in f if ln.strip()]
+        terms = terms + file_terms if terms else file_terms
+    if overrides.only:
+        terms = overrides.only
+    if overrides.max_terms:
+        terms = terms[:overrides.max_terms]
+    return terms
+
+
 def run_clinicaltrials(conf: Dict[str, Any], overrides: argparse.Namespace) -> int:
-    """
-    Runs the ClinicalTrials.gov API v2 fetcher across terms from config,
-    honoring CLI overrides. Returns number of study objects saved.
-    """
     src_conf = conf.get("clinicaltrials", {})
     out_dir = src_conf.get("out", "./data/raw/clinicaltrials")
     page_size = overrides.page_size if overrides.page_size else src_conf.get("page_size", 25)
     max_pages = overrides.max_pages if overrides.max_pages else src_conf.get("max_pages", 40)
     status_filter = overrides.status_filter if overrides.status_filter is not None else src_conf.get("status_filter")
+    workers = max(1, overrides.workers)
 
-    # Determine term list
-    terms: List[str] = src_conf.get("disease_terms", []) or []
-
-    # Optionally load from file (one term per line)
-    terms_file = src_conf.get("disease_terms_file")
-    if terms_file and os.path.exists(terms_file):
-        with open(terms_file, "r", encoding="utf-8") as f:
-            file_terms = [ln.strip() for ln in f if ln.strip()]
-        if not terms:
-            terms = file_terms
-        else:
-            terms.extend(file_terms)
-
-    # CLI overrides
-    if overrides.only:
-        terms = overrides.only
-    if overrides.max_terms is not None:
-        terms = terms[:overrides.max_terms]
-
-    # Guard against empty list
+    terms = _load_terms(src_conf, overrides)
     if not terms:
-        log.info("[ctgov] No terms found. Check conf: clinicaltrials.disease_terms or --only/--max-terms overrides.")
+        log.info("[ctgov] No terms found. Check config or use --only.")
         log.info(f"[clinicaltrials] fetched=0, shards={out_dir}")
         return 0
 
-    log.info(f"[ctgov] mode=disease_terms queries={len(terms)} page_size={page_size} status_filter={status_filter or 'ANY'}")
+    log.info(f"[ctgov] mode=disease_terms queries={len(terms)} page_size={page_size} status_filter={status_filter or 'ANY'} workers={workers}")
 
-    # Debug first URL (API v2 preview; actual requests use params dict)
-    preview_params = {
-        "query.cond": terms[0],
-        "pageSize": str(page_size),
-        "format": "json",
-    }
+    # v2 debug URL preview
+    preview_params = {"query.cond": terms[0], "pageSize": str(page_size), "format": "json"}
     if status_filter:
         preview_params["filter.overallStatus"] = status_filter
     debug_url = f"https://clinicaltrials.gov/api/v2/studies?{urlencode(preview_params)}"
@@ -107,30 +87,40 @@ def run_clinicaltrials(conf: Dict[str, Any], overrides: argparse.Namespace) -> i
         return 0
 
     os.makedirs(out_dir, exist_ok=True)
-    session = make_session()
-    total_saved = 0
 
-    for idx, term in enumerate(terms, 1):
-        try:
-            saved = ctgov_fetch_term(
-                term=term,
-                out_dir=out_dir,
-                page_size=page_size,
-                max_pages=max_pages,
-                status_filter=status_filter,
-                session=session,
-            )
-            total_saved += saved
-        except Exception as e:
-            log.error(f"[ctgov] Term '{term}' failed: {e}")
+    total_saved = 0
+    if workers == 1:
+        # sequential (safest)
+        session = make_session()
+        for term in terms:
+            try:
+                total_saved += ctgov_fetch_term(
+                    term=term, out_dir=out_dir, page_size=page_size,
+                    max_pages=max_pages, status_filter=status_filter, session=session
+                )
+            except Exception as e:
+                log.error(f"[ctgov] Term '{term}' failed: {e}")
+    else:
+        # concurrent by term; each worker uses its own session (simpler & thread-safe)
+        def _do(term: str) -> int:
+            return ctgov_fetch_term(term=term, out_dir=out_dir, page_size=page_size,
+                                    max_pages=max_pages, status_filter=status_filter, session=None)
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            fut_map = {ex.submit(_do, t): t for t in terms}
+            for fut in as_completed(fut_map):
+                term = fut_map[fut]
+                try:
+                    saved = fut.result()
+                    total_saved += int(saved or 0)
+                    log.info(f"[ctgov] DONE term='{term}' saved={saved}")
+                except Exception as e:
+                    log.error(f"[ctgov] Term '{term}' failed: {e}")
 
     log.info(f"[clinicaltrials] fetched={total_saved}, shards={out_dir}")
     return total_saved
 
 
-# ----------------------------
-# Dispatch table & main
-# ----------------------------
 def main() -> None:
     args = parse_args()
     cfg = load_config(args.config)
@@ -138,15 +128,10 @@ def main() -> None:
     requested_sources = [s.lower() for s in args.sources]
     log.info(f"Sources to run: {requested_sources}")
 
-    runners = {
-        "clinicaltrials": run_clinicaltrials,
-        # "openfda": run_openfda,   # wire when ready
-        # "pubmed": run_pubmed,     # wire when ready
-    }
+    runners = {"clinicaltrials": run_clinicaltrials}
 
-    overall_count = 0
+    overall = 0
     had_errors = False
-
     for src in requested_sources:
         fn = runners.get(src)
         if not fn:
@@ -154,8 +139,7 @@ def main() -> None:
             had_errors = True
             continue
         try:
-            count = fn(cfg, args)
-            overall_count += int(count or 0)
+            overall += int(fn(cfg, args) or 0)
         except KeyboardInterrupt:
             log.error(f"[{src}] interrupted by user.")
             had_errors = True
@@ -166,9 +150,8 @@ def main() -> None:
 
     if had_errors:
         sys.exit(2)
-    else:
-        log.info(f"All done. Total items fetched: {overall_count}")
-        sys.exit(0)
+    log.info(f"All done. Total items fetched: {overall}")
+    sys.exit(0)
 
 
 if __name__ == "__main__":
