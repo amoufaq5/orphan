@@ -1,15 +1,16 @@
 scrape:
   user_agent: "orphan-studio/0.1 (contact: ops@orphan.local)"
-  max_concurrency: 2
-  request_timeout_sec: 30
-  total_retries: 5
-  backoff_base_sec: 0.5
-  backoff_max_sec: 8
+  request_timeout_sec: 45
+  total_retries: 7
+  backoff_base_sec: 1.0
+  backoff_max_sec: 30
+  max_concurrency: 1
   rate:
-    requests_per_second: 3
-    burst: 3
+    requests_per_second: 0.5
+    burst: 1
   paging:
-    max_pages_per_source: 2        # ← small for first batch
+    max_pages_per_source: 2
+
   caps:
     max_docs_per_source: 1000      # ← small for first batch (per source)
   shards:
