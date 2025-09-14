@@ -27,3 +27,24 @@ model_runtime:
   temperature: 0.8
   top_p: 0.9
   persona: "doctor"
+
+rag:
+  index_path: "out/rag/index.pkl"      # where the TF-IDF index lives
+  top_k: 5                              # passages to stuff into the prompt
+  max_ctx_chars: 600                    # truncate each passage
+  source_globs:
+    - "data/canonical/canonical*.jsonl"
+  include_types: ["drug_label","trial","article"]
+  section_keys:                         # which sections to consider when building passages
+    - "sections.indications"
+    - "sections.dosage"
+    - "sections.contraindications"
+    - "sections.warnings"
+    - "sections.adverse_reactions"
+    - "sections.interactions"
+    - "sections.patient_information"
+    - "sections.storage_and_handling"
+    - "sections.body"
+  chunk:
+    max_len: 900                        # ~ tokens-ish; characters are fine for TF-IDF
+    overlap: 120
