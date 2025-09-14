@@ -14,6 +14,7 @@ def main():
 
     cfg = load_yaml(args.config)
     scrape_cfg = cfg.get("scrape", {})
+    user_agent = scrape_cfg.get("user_agent", "orphan-studio/0.1 (contact: ops@orphan.local)")
 
     # read disease terms
     with open(args.diseases, "r", encoding="utf-8") as f:
@@ -22,19 +23,20 @@ def main():
         log.error("no disease terms found.")
         return
 
-    # instantiate with YAML params
-    sc = ClinicalTrialsGovScraper(
-        expr_list=terms,
-        user_agent=scrape_cfg.get("user_agent", "orphan-studio/0.1"),
-        max_pages=scrape_cfg.get("paging", {}).get("max_pages_per_source", 2),
-        out_dir=scrape_cfg.get("out_dir", "data/shards"),
-        request_timeout_sec=scrape_cfg.get("request_timeout_sec", 30),
-        total_retries=scrape_cfg.get("total_retries", 5),
-        backoff_base_sec=scrape_cfg.get("backoff_base_sec", 0.5),
-        backoff_max_sec=scrape_cfg.get("backoff_max_sec", 8),
-        rate_limit_per_sec=scrape_cfg.get("rate", {}).get("requests_per_second", 3),
-    )
-    sc.run()  # writes shards to out_dir
+    # Instantiate with the ONLY required arg for BaseScraper, then load the rest from YAML
+    sc = ClinicalTrialsGovScraper(expr_list=terms, user_agent=user_agent)
+
+    # Load rate limits, retries, output dirs, etc. from YAML
+    sc.configure_from_yaml(args.config)
+
+    # Optional: sync max_pages/page_size from config if you want explicit control
+    paging = scrape_cfg.get("paging", {})
+    if "max_pages_per_source" in paging:
+        sc.max_pages = int(paging["max_pages_per_source"])
+    # If you added page_size to your clinicaltrials scraper, you can read a custom value here:
+    # sc.page_size = int(scrape_cfg.get("ctgov_page_size", sc.page_size))
+
+    sc.run()  # writes shards using configured out_dir
 
 if __name__ == "__main__":
     main()
