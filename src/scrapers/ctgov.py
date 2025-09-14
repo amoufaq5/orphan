@@ -99,4 +99,3 @@ def fetch_term(
             break
 
     return saved
-ccccc
