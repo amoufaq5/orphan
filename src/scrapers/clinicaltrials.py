@@ -1,5 +1,5 @@
 from __future__ import annotations
-import datetime as dt
+import datetime as dt, urllib.parse
 from typing import Any, Dict, Iterable, List, Tuple, Optional
 from .base_scraper import BaseScraper
 from .registry import register
@@ -51,42 +51,33 @@ DISEASE_TERMS: List[str] = [
     "psoriasis", "atopic dermatitis", "eczema", "acne vulgaris",
 ]
 
-# Keep fields compact to reduce payload size and avoid API errors under slow links
+# Keep fields *very* compact to reduce payload size / errors
 FIELDS = [
     "NCTId", "BriefTitle", "OfficialTitle", "OverallStatus",
     "Condition", "InterventionType", "InterventionName",
     "Phase", "StudyType",
-    "PrimaryOutcomeMeasure", "PrimaryOutcomeTimeFrame",
+    "PrimaryOutcomeMeasure",
     "StudyFirstPostDate", "LastUpdateSubmitDate",
-    "LocationCountry", "LeadSponsorName",
 ]
 
-def _expr_for(term: str) -> str:
+def _expr_for(term: str, status_filter: Optional[str]) -> str:
     """
-    Compose a ClinicalTrials.gov StudyFields expression for a disease term.
-    Matches across Condition / BriefTitle / OfficialTitle for higher recall.
+    Build a StudyFields expression. Optionally AND with status to shrink results.
     """
     t = (term or "").strip()
     if not t:
-        return "AREA[OverallStatus] *"
-    return f'(AREA[Condition] "{t}") OR (AREA[BriefTitle] "{t}") OR (AREA[OfficialTitle] "{t}")'
+        base = "AREA[OverallStatus] *"
+    else:
+        base = f'(AREA[Condition] "{t}") OR (AREA[BriefTitle] "{t}") OR (AREA[OfficialTitle] "{t}")'
+    if status_filter:
+        return f"({base}) AND (AREA[OverallStatus] {status_filter})"
+    return base
 
 @register("clinicaltrials")
 class ClinicalTrialsGovScraper(BaseScraper):
     """
-    ClinicalTrials.gov Study Fields scraper with built-in disease sweep.
-
-    Default behavior:
-      • Iterates DISEASE_TERMS and queries each broadly.
-      • Respects global rate/paging/retry settings from conf/scrape.yaml.
-      • Emits RawDoc shards with provenance.
-
-    Overrides via kwargs (optional, if your runner supports per-scraper kwargs):
-      - expr: str                      # single StudyFields expression
-      - expr_list: List[str]           # multiple expressions
-      - use_disease_list: bool         # default True
-      - disease_terms: List[str]       # replace built-in list
-      - page_size: int                 # default 50 (polite)
+    ClinicalTrials.gov Study Fields scraper with built-in disease sweep,
+    gentler defaults, explicit JSON headers, and status filtering.
     """
 
     name = "clinicaltrials"
@@ -96,19 +87,17 @@ class ClinicalTrialsGovScraper(BaseScraper):
         *args,
         expr: Optional[str] = None,
         expr_list: Optional[List[str]] = None,
-        page_size: int = 50,                 # ↓ gentler default (was 100)
+        page_size: int = 25,                 # ↓ even gentler (25 rows)
         use_disease_list: bool = True,
         disease_terms: Optional[List[str]] = None,
+        status_filter: Optional[str] = "Recruiting",  # ← try "Recruiting" first; set to None to disable
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        # Be polite: API allows up to 1000, we cap at 500 and default to 50
-        self.page_size = max(1, min(500, page_size))
+        self.page_size = max(1, min(250, page_size))
+        self.status_filter = status_filter
 
-        # Query source priority:
-        # 1) explicit expr_list
-        # 2) single expr
-        # 3) built-in disease list (default)
+        # Priority: expr_list > expr > disease list > catch-all
         if expr_list:
             self.queries: List[str] = expr_list
             self.query_mode = "expr_list"
@@ -124,11 +113,17 @@ class ClinicalTrialsGovScraper(BaseScraper):
                 self.queries = terms
                 self.query_mode = "disease_terms"
 
-        log.info(f"[ctgov] mode={self.query_mode} queries={len(self.queries)} page_size={self.page_size}")
+        # Per-request headers (BaseScraper should merge these with global UA)
+        self.request_headers = {
+            "Accept": "application/json",
+        }
+
+        log.info(f"[ctgov] mode={self.query_mode} queries={len(self.queries)} page_size={self.page_size} status_filter={self.status_filter}")
 
     def build_requests(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
+        first_url_logged = False
         for q in self.queries:
-            expr = _expr_for(q) if self.query_mode == "disease_terms" else q
+            expr = _expr_for(q, self.status_filter) if self.query_mode == "disease_terms" else q
             for p in range(self.max_pages):
                 start = p * self.page_size + 1
                 end = start + self.page_size - 1
@@ -139,6 +134,16 @@ class ClinicalTrialsGovScraper(BaseScraper):
                     "max_rnk": end,
                     "fmt": "json",
                 }
+                # Hint to runner (if supported) to attach headers & extended timeout
+                params["__headers__"] = self.request_headers
+                params["__timeout__"] = 45  # seconds
+
+                if not first_url_logged:
+                    # Log the first full URL for debugging
+                    debug_qs = urllib.parse.urlencode({k: v for k, v in params.items() if not str(k).startswith("__")})
+                    log.info(f"[ctgov] debug first url: {API}?{debug_qs}")
+                    first_url_logged = True
+
                 yield API, params
 
     def parse(self, payload: Dict[str, Any]) -> Iterable[RawDoc]:
@@ -162,11 +167,8 @@ class ClinicalTrialsGovScraper(BaseScraper):
             phase  = one("Phase")
             stype  = one("StudyType")
             p_out  = many("PrimaryOutcomeMeasure")
-            p_tf   = many("PrimaryOutcomeTimeFrame")
             first  = one("StudyFirstPostDate")
             upd    = one("LastUpdateSubmitDate")
-            country= many("LocationCountry")
-            sponsor= one("LeadSponsorName")
 
             parts: List[str] = []
             if status: parts.append(f"Status: {status}")
@@ -175,8 +177,6 @@ class ClinicalTrialsGovScraper(BaseScraper):
             if conds:  parts.append("Conditions: " + "; ".join(conds))
             if inter_names: parts.append("Interventions: " + "; ".join(inter_names))
             if p_out:  parts.append("Primary Outcomes: " + "; ".join(p_out))
-            if p_tf:   parts.append("Timeframes: " + "; ".join(p_tf))
-
             text = "\n\n".join(parts) if parts else None
 
             prov = Provenance(
@@ -194,14 +194,11 @@ class ClinicalTrialsGovScraper(BaseScraper):
                 "conditions": conds,
                 "intervention_types": inter_types,
                 "intervention_names": inter_names,
-                "primary_outcomes": p_out,
-                "primary_outcomes_timeframe": p_tf,
                 "phase": phase,
                 "study_type": stype,
+                "primary_outcomes": p_out,
                 "first_posted": first,
                 "last_update": upd,
-                "countries": country,
-                "lead_sponsor": sponsor,
                 "lang": "en",
                 "raw": row,
                 "query_mode": getattr(self, "query_mode", None),
