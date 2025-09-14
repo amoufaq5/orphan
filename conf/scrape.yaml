@@ -1,30 +1,23 @@
 # conf/scrape.yaml
-# Scraper sources to run (expand later if you wire more runners)
 sources: [clinicaltrials]
 
 clinicaltrials:
-  # Output directory for shards
+  # Where shards will be saved
   out: ./data/raw/clinicaltrials
 
-  # Paging controls (API v2 uses pageSize + pageToken)
-  page_size: 25          # safe & stable (raise later if needed)
-  max_pages: 40          # cap pages per term (e.g., 25*40 = 1000 studies max/term)
+  # ClinicalTrials.gov API v2 paging
+  page_size: 25          # safe; you can raise to 50 if stable
+  max_pages: 40          # per-term cap (25*40 = 1000 studies/term)
 
-  # Overall status filter (API v2 enums preferred)
+  # Status filter (v2 enums). Set to "" (empty) to include ALL statuses.
   # Examples: RECRUITING, NOT_YET_RECRUITING, ACTIVE_NOT_RECRUITING, COMPLETED, TERMINATED, SUSPENDED
-  # Set to null or remove to include all statuses.
-  status_filter: RECRUITING
+  status_filter: ""
 
-  # ---- PICK ONE OPTION BELOW ----
-  # Option A: keep your terms inline here
-  disease_terms:
-    - asthma
-    - diabetes mellitus
-    - breast cancer
-    - hypertension
-    - chronic kidney disease
-    - osteoporosis
+  # Use a separate file for long term lists (one term per line)
+  disease_terms_file: conf/disease_terms.txt
 
-  # Option B: or load from a file (one term per line). If both are present,
-  # they'll be combined. Comment out if you don't use it.
-  # disease_terms_file: conf/disease_terms.txt
+  # (Optional) You can also keep some inline terms; both will be combined.
+  # disease_terms:
+  #   - asthma
+  #   - diabetes mellitus
+  #   - breast cancer
