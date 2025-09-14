@@ -1,10 +1,14 @@
-import time, random
+# src/scrapers/http.py (only the sleep helper changed)
+import os, time, random
 from typing import Dict, Optional
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 _DEFAULT_UA = "orphan-scraper/1.0 (+https://github.com/your-org) requests"
+
+_MIN = float(os.getenv("ORPH_HTTP_MIN_SLEEP", "0.25"))
+_MAX = float(os.getenv("ORPH_HTTP_MAX_SLEEP", "0.45"))
 
 def make_session(timeout: float = 30.0, max_retries: int = 5) -> requests.Session:
     s = requests.Session()
@@ -25,11 +29,8 @@ def make_session(timeout: float = 30.0, max_retries: int = 5) -> requests.Sessio
     s.request_timeout = timeout
     return s
 
-def _polite_sleep():
-    time.sleep(random.uniform(0.25, 0.45))  # ~3 req/s with jitter
-
 def get_json(session: requests.Session, url: str, params: Dict, timeout: Optional[float] = None) -> dict:
-    _polite_sleep()
+    time.sleep(random.uniform(_MIN, _MAX))
     resp = session.get(url, params=params, timeout=timeout or session.request_timeout)
     if resp.status_code >= 400:
         body = (resp.text or "")[:600]
