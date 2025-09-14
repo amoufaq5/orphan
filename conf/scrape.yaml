@@ -21,3 +21,23 @@ clinicaltrials:
   #   - asthma
   #   - diabetes mellitus
   #   - breast cancer
+
+pubmed:
+  out: ./data/raw/pubmed
+  disease_terms_file: conf/disease_terms.txt
+
+  # How many PMIDs to request per ESearch page (max ~10k; 1000 is safe).
+  retmax: 1000
+
+  # Hard cap per term (protects disk/time). Raise if you truly want *everything*.
+  max_docs_per_term: 5000
+
+  # How many PMIDs per EFetch call (PubMed likes <= 200).
+  efetch_batch_size: 200
+
+  # Optional time filter; leave blank for all-time
+  since_year: ""         # e.g. "2000"
+  until_year: ""         # e.g. "2025"
+
+  # Query template (TERM is substituted). Adjust if you want stricter/looser matches.
+  search_query_template: '("%TERM%"[Title/Abstract]) OR ("%TERM%"[MeSH Terms])'
