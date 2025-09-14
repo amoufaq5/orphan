@@ -9,11 +9,33 @@ from ...utils.logger import get_logger
 
 log = get_logger("train")
 
+def _resolve_spm_path(cfg) -> str:
+    # 1) prefer explicit train.tokenizer_files.spm_model
+    try:
+        p = cfg["train"]["tokenizer_files"]["spm_model"]
+        if p: return p
+    except Exception:
+        pass
+    # 2) try app.yaml-style location if present in this same config
+    try:
+        p = cfg["model_runtime"]["spm_model"]
+        if p: return p
+    except Exception:
+        pass
+    # 3) default fallback
+    return "out/tokenizer/orph_spm.model"
+
+def _resolve_vocab_size(spm_model: str) -> int:
+    vocab_path = os.path.splitext(spm_model)[0] + ".vocab"
+    if not os.path.exists(vocab_path):
+        raise FileNotFoundError(f"SPM vocab not found: {vocab_path}. Did you train the tokenizer?")
+    with open(vocab_path, "r", encoding="utf-8") as f:
+        return sum(1 for _ in f)
+
 def build_dataloader(cfg, spm_path: str, world_size: int = 1):
     data_cfg = cfg["train"]["data"]
     globs = [data_cfg["train_glob"]] if isinstance(data_cfg["train_glob"], str) else data_cfg["train_glob"]
-    # UPDATED: read pad/unk ids from the model
-    tok = SentencePieceWrapper(spm_path)
+    tok = SentencePieceWrapper(spm_path, pad_id=0, unk_id=3)  # adjust if different
     ds = PackedLMIterable(
         tokenizer=tok,
         globs=globs,
@@ -49,17 +71,17 @@ def main():
     args = ap.parse_args()
     cfg = load_yaml(args.config)
 
-    io = cfg["train"]["io"]
-    tok_files = cfg["train"]["tokenizer_files"]
-    spm_model = tok_files["spm_model"]
+    # --- robust tokenizer path resolution ---
+    spm_model = _resolve_spm_path(cfg)
     if not os.path.exists(spm_model):
-        log.error(f"SPM model not found at {spm_model}.")
+        log.error(f"SPM model not found at {spm_model}. Train the tokenizer first.")
+        log.error("Run:\n  python -m src.models.tokenizer.build_corpus --config conf/train_text.yaml\n"
+                  "  python -m src.models.tokenizer.train_tokenizer_spm --config conf/train_text.yaml")
         return
-
-    # infer vocab size from .vocab file
-    vocab_path = os.path.splitext(spm_model)[0] + ".vocab"
-    with open(vocab_path, "r", encoding="utf-8") as f:
-        vocab_size = sum(1 for _ in f)
+    try:
+        vocab_size = _resolve_vocab_size(spm_model)
+    except FileNotFoundError as e:
+        log.error(str(e)); return
 
     set_seed(int(cfg["train"]["optimization"].get("seed", 1337)))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -78,7 +100,8 @@ def main():
         betas=tuple(opt_cfg.get("betas", [0.9, 0.95])),
         eps=float(opt_cfg.get("eps", 1e-8)),
     )
-    total_steps = int(opt_cfg.get("epochs", 1) * 100000)  # rough placeholder
+    # estimate steps (rough); adjust later if you like
+    total_steps = int(opt_cfg.get("epochs", 1) * 100000)
     warmup_ratio = float(opt_cfg.get("warmup_ratio", 0.06))
     scheduler = CosineWithWarmup(optimizer, warmup_steps=int(total_steps*warmup_ratio), total_steps=total_steps)
 
@@ -98,7 +121,7 @@ def main():
         best_eval = ckpt.get("best_eval", None)
         log.info(f"Resumed from {args.resume} at step={step}")
 
-    model.train()
+    io = cfg["train"]["io"]
     save_every = int(io.get("save_every_steps", 1000))
     eval_every = int(io.get("eval_every_steps", 1000))
     log_every  = int(io.get("log_every_steps", 100))
@@ -128,14 +151,12 @@ def main():
 
         if step % log_every == 0 and step > 0:
             tokps = (batch.numel() * log_every) / (time.time() - start + 1e-6)
-            import math
             ppl = math.exp(min(20.0, running / log_every))
             log.info(f"step={step} loss={running/log_every:.4f} ppl≈{ppl:.2f} tok/s≈{tokps:.0f}")
             running = 0.0
             start = time.time()
 
         if step % eval_every == 0 and step > 0:
-            import math
             model.eval()
             with torch.no_grad():
                 eval_loss, n = 0.0, 0
@@ -143,11 +164,20 @@ def main():
                     if i >= 20: break
                     eb = eb.to(device)
                     _, l = model(eb, labels=eb)
-                    eval_loss += float(l.item())
-                    n += 1
+                    eval_loss += float(l.item()); n += 1
                 eval_loss /= max(1, n)
                 eval_ppl = math.exp(min(20.0, eval_loss))
                 log.info(f"[eval] step={step} loss={eval_loss:.4f} ppl≈{eval_ppl:.2f}")
+                if best_eval is None or eval_ppl < best_eval:
+                    best_eval = eval_ppl
+                    save_checkpoint(os.path.join(out_dir, f"best.pt"), {
+                        "model": model.state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                        "scheduler": scheduler.state_dict(),
+                        "step": step,
+                        "best_eval": best_eval,
+                        "cfg": cfg,
+                    })
             model.train()
 
         if step % save_every == 0 and step > 0:
@@ -160,7 +190,6 @@ def main():
                 "best_eval": best_eval,
                 "cfg": cfg,
             })
-            # prune old
             snaps = sorted(glob.glob(os.path.join(out_dir, "step_*.pt")), key=os.path.getmtime)
             if len(snaps) > keep_n:
                 for s in snaps[:-keep_n]:
