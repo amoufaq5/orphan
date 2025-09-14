@@ -1,0 +1,26 @@
+asthma
+diabetes mellitus
+hypertension
+ischemic heart disease
+stroke
+migraine
+depression
+anxiety
+osteoarthritis
+rheumatoid arthritis
+chronic kidney disease
+copd
+covid-19
+influenza
+hepatitis b
+hepatitis c
+hiv infection
+breast cancer
+lung cancer
+colorectal cancer
+prostate cancer
+leukemia
+lymphoma
+multiple sclerosis
+parkinson disease
+alzheimer disease
