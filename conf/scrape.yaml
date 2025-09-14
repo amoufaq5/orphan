@@ -1,20 +1,18 @@
-scrape:
-  user_agent: "orphan-studio/0.1 (contact: ops@orphan.local)"
-  request_timeout_sec: 45
-  total_retries: 7
-  backoff_base_sec: 1.0
-  backoff_max_sec: 30
-  max_concurrency: 1
-  rate:
-    requests_per_second: 0.5
-    burst: 1
-  paging:
-    max_pages_per_source: 2
+# conf/scrape.yaml
+sources: [clinicaltrials]
 
-  caps:
-    max_docs_per_source: 1000      # ← small for first batch (per source)
-  shards:
-    max_records_per_shard: 1000
-  keys:
-    pubmed_api_key: "${PUBMED_API_KEY:-}"
-    openfda_api_key: "${OPENFDA_API_KEY:-}"
+clinicaltrials:
+  out: ./data/raw/clinicaltrials
+  page_size: 25          # how many studies per request
+  max_pages: 40          # cap to avoid runaway scraping
+  status_filter: Recruiting   # remove or set to null to include all statuses
+  # Option A: inline terms
+  disease_terms:
+    - asthma
+    - diabetes mellitus
+    - breast cancer
+    - hypertension
+    - chronic kidney disease
+    - osteoporosis
+  # Option B: put terms in a separate file (one per line)
+  # disease_terms_file: conf/disease_terms.txt
