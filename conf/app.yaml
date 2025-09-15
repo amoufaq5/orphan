@@ -33,3 +33,11 @@ personas:
     style: "neutral"
     enforce_otc: true
     include_disclaimer: true
+
+rag:
+  index_dir: "data/index/faiss"
+  corpus_file: "data/corpus/corpus.jsonl.gz"
+
+  # chunking params
+  chunk_size: 512
+  chunk_overlap: 50
