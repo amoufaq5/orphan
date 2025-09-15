@@ -6,46 +6,83 @@ defaults:
   max_rows: 0
   shuffle: true
   csv_delimiter: ","
+  min_text_len: 3    # allow shorter reviews
 
 datasets:
   ###########################################################################
-  # PubMed RCT TXT (folders directly in .../data/raw/kaggle/)
+  # PubMed RCT TXT (LABEL \t SENTENCE, abstracts separated by blank lines)
   ###########################################################################
   - slug: "200k_abstracts"
     title: "PubMed 200k RCT"
-    # train/dev/test are files inside: data/raw/kaggle/200k_abstracts/
-    files: ["train", "dev", "test"]
+    files: ["train.txt", "dev.txt", "test.txt"]
     format: "pubmed200k"
     map: { text: "sentence", label: "section", title: "pmid" }
     tags: ["pubmed","abstracts","rct"]
 
   - slug: "20k_abstracts"
     title: "PubMed 20k RCT"
-    files: ["train", "dev", "test"]
+    files: ["train.txt", "dev.txt", "test.txt"]
     format: "pubmed200k"
     map: { text: "sentence", label: "section", title: "pmid" }
     tags: ["pubmed","abstracts","rct"]
 
   - slug: "20k_abstracts_numbers_with_@"
     title: "PubMed 20k RCT (numbers → @)"
-    files: ["train", "dev", "test"]
+    files: ["train.txt", "dev.txt", "test.txt"]
     format: "pubmed200k"
     map: { text: "sentence", label: "section", title: "pmid" }
     tags: ["pubmed","abstracts","rct","sanitized"]
 
   - slug: "Numbers_replaced_with_@"
     title: "PubMed 200k RCT (numbers → @)"
-    files: ["train", "dev", "test"]
+    files: ["train.txt", "dev.txt", "test.txt"]
     format: "pubmed200k"
     map: { text: "sentence", label: "section", title: "pmid" }
     tags: ["pubmed","abstracts","rct","sanitized"]
 
   ###########################################################################
-  # Excel/CSV files that sit DIRECTLY in .../data/raw/kaggle/
-  # (One slug per workbook/file; files: ["ExactFileName.xlsx|csv"])
+  # Root-level CSV/XLSX (exact filenames — adjust if your casing differs)
   ###########################################################################
+  - slug: "drugs_side_effects_drugs_com"
+    title: "Drugs.com Reviews"
+    files: ["drugs_side_effects_drugs_com.csv"]
+    format: "csv"
+    text_cols: ["review","review_text"]
+    label_col: "condition"
+    extra_cols: ["drugName","rating","date","usefulCount"]
+    tags: ["drug","otc","patient_review"]
+    map: { text: ["review","review_text"], label: "condition", title: "drugName" }
+
+  - slug: "webmd"
+    title: "WebMD Reviews"
+    files: ["webmd.csv"]
+    format: "csv"
+    text_cols: ["review","content","review_text"]
+    label_col: "condition"
+    extra_cols: ["drug","rating","date"]
+    tags: ["drug","patient_review","otc"]
+    map: { text: ["review","content","review_text"], label: "condition", title: "drug" }
+
+  - slug: "symptoms_df"
+    title: "Symptoms ↔ Disease"
+    files: ["symptoms_df.csv"]
+    format: "csv"
+    text_cols: ["Symptom","Description"]
+    label_col: "Disease"
+    tags: ["symptom_graph"]
+    map: { text: ["Symptom","Description"], label: "Disease", title: "Disease" }
+
+  - slug: "Symptom-severity"
+    title: "Symptom Severity"
+    files: ["Symptom-severity.csv"]
+    format: "csv"
+    text_cols: ["Symptom"]
+    label_col: "weight"
+    tags: ["symptom_graph","severity"]
+    map: { text: "Symptom", label: "weight", title: "Symptom" }
+
   - slug: "Medicine_Details"
-    title: "Medicine Details (XLSX)"
+    title: "Medicine Details"
     files: ["Medicine_Details.xlsx"]
     format: "xlsx"
     sheet: 0
@@ -56,17 +93,17 @@ datasets:
     map: { text: "Description", label: "DrugName", title: "DrugName" }
 
   - slug: "Drugs_package"
-    title: "Drugs Package (XLSX)"
+    title: "Drugs Package"
     files: ["Drugs_package.xlsx"]
     format: "xlsx"
     sheet: 0
-    text_cols: ["Text","Description"]   # adjust to match actual columns
+    text_cols: ["Text","Description"]
     label_col: "Category"
     tags: ["drug","package"]
     map: { text: ["Text","Description"], label: "Category", title: "Category" }
 
   - slug: "Drugs_product"
-    title: "Drugs Product (XLSX)"
+    title: "Drugs Product"
     files: ["Drugs_product.xlsx"]
     format: "xlsx"
     sheet: 0
@@ -75,46 +112,8 @@ datasets:
     tags: ["drug","product"]
     map: { text: "Description", label: "Product", title: "Product" }
 
-  - slug: "drugs_side_effects_drugs_com"
-    title: "Drugs.com Reviews (CSV)"
-    files: ["drugs_side_effects_drugs_com.csv"]
-    format: "csv"
-    text_cols: ["review"]
-    label_col: "condition"
-    extra_cols: ["drugName","rating","date","usefulCount"]
-    tags: ["drug","otc","patient_review"]
-    map: { text: "review", label: "condition", title: "drugName" }
-
-  - slug: "webmd"
-    title: "WebMD Reviews (CSV)"
-    files: ["webmd.csv"]
-    format: "csv"
-    text_cols: ["review"]
-    label_col: "condition"
-    extra_cols: ["drug","rating","date"]
-    tags: ["drug","patient_review","otc"]
-    map: { text: "review", label: "condition", title: "drug" }
-
-  - slug: "Symptom-severity"
-    title: "Symptom Severity (CSV)"
-    files: ["Symptom-severity.csv"]
-    format: "csv"
-    text_cols: ["Symptom"]
-    label_col: "weight"
-    tags: ["symptom_graph","severity"]
-    map: { text: "Symptom", label: "weight", title: "Symptom" }
-
-  - slug: "symptoms_df"
-    title: "Symptoms ↔ Disease (CSV)"
-    files: ["symptoms_df.csv"]
-    format: "csv"
-    text_cols: ["Symptom","Description"] # if "Description" not present, remove it
-    label_col: "Disease"
-    tags: ["symptom_graph"]
-    map: { text: ["Symptom","Description"], label: "Disease", title: "Disease" }
-
   - slug: "medications"
-    title: "Medications (CSV)"
+    title: "Medications"
     files: ["medications.csv"]
     format: "csv"
     text_cols: ["Description"]
@@ -122,13 +121,21 @@ datasets:
     tags: ["drug"]
     map: { text: "Description", label: "Medication", title: "Medication" }
 
-  # Add more root-level files as needed:
-  # - slug: "Star_rating_spring_master_data"
-  #   title: "Medicare Star Ratings (XLSX)"
-  #   files: ["Star_rating_spring_master_data.xlsx"]
-  #   format: "xlsx"
-  #   sheets: ["Domain","Summary"]   # change to your actual sheet names
-  #   text_cols: ["Measure_Description"]
-  #   label_col: "Measure_ID"
-  #   tags: ["quality","ratings"]
-  #   map: { text: "Measure_Description", label: "Measure_ID", title: "Measure_ID" }
+  - slug: "Star_ratings"
+    title: "Medicare Star Ratings"
+    files: ["Star_rating_spring_master_data.xlsx"]
+    format: "xlsx"
+    sheets: ["Domain","Summary"]   # change to actual sheet names
+    text_cols: ["Measure_Description"]
+    label_col: "Measure_ID"
+    tags: ["quality","ratings"]
+    map: { text: "Measure_Description", label: "Measure_ID", title: "Measure_ID" }
+
+  - slug: "Nhans_2005_2006"
+    title: "NHANES 2005–2006"
+    files: ["Nhans_2005_2006.csv"]
+    format: "csv"
+    text_cols: ["Notes","Description"]
+    label_col: null
+    tags: ["nhanes"]
+    map: { text: ["Notes","Description"], title: "Dataset" }
