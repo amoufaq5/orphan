@@ -13,7 +13,7 @@ def load_corpus(path: str) -> List[Dict]:
 
 def main():
     ap = argparse.ArgumentParser(description="Build TF-IDF retrieval index")
-    ap.add_argument("--corpus", default="./data/cleaned/corpus.jsonl")
+    ap.add_argument("--corpus", default="./data/corpus/corpus.jsonl")
     ap.add_argument("--outdir", default="./out/rag")
     ap.add_argument("--max_df", type=float, default=0.95)
     ap.add_argument("--min_df", type=int, default=2)
