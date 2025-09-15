@@ -5,10 +5,10 @@ clean:
   pubmed: "data/clean/pubmed"
   ctgov: "data/clean/ctgov"
   openfda: "data/clean/openfda"
-  kaggle: "data/clean/kaggle"   # ✅ cleaned Kaggle datasets from kaggle_ingest.py
+  kaggle: "data/clean/kaggle"
 
 corpus:
   out: "data/corpus/corpus.jsonl.gz"
-  min_chars: 20        # drop very short snippets
-  lang: "en"           # keep only English for now
-  shuffle: true        # randomize before writing
+  min_chars: 20
+  lang: "en"
+  shuffle: true
