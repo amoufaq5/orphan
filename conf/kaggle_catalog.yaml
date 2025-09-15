@@ -1,41 +1,187 @@
 # conf/kaggle_catalog.yaml
+# Catalog of Kaggle datasets to ingest into canonical JSONL via src/scrapers/kaggle_ingest.py
+
 defaults:
   lang: "en"
   license: "unknown"
   pii_mask: true
-  max_rows: 0         # 0 = no cap
+  max_rows: 0            # 0 = no row cap
   shuffle: true
-  csv_delimiter: ","  # default delimiter for CSVs
+  csv_delimiter: ","     # per-dataset override allowed
 
 datasets:
-  # EXAMPLE CSV dataset
-  - slug: "drug_reviews"
-    title: "Drug Reviews (Kaggle)"
-    files:
-      - "files/drugsCom_raw/drugsComTrain_raw.csv"   # CSV
-      - "files/drugsCom_raw/drugsComTest_raw.csv"
+  ###########################################################################
+  # PubMed RCT-format TXT (LABEL \t SENTENCE, abstracts separated by blanks)
+  ###########################################################################
+  - slug: "200k_abstracts"
+    title: "PubMed 200k RCT"
+    files: ["train", "dev", "test"]             # text files in this folder
+    format: "pubmed200k"
+    map:
+      text: "sentence"
+      label: "section"
+      title: "pmid"
+    tags: ["pubmed","abstracts","rct"]
+
+  - slug: "20k_abstracts"
+    title: "PubMed 20k RCT"
+    files: ["train", "dev", "test"]
+    format: "pubmed200k"
+    map: { text: "sentence", label: "section", title: "pmid" }
+    tags: ["pubmed","abstracts","rct"]
+
+  - slug: "20k_abstracts_numbers_with_@"
+    title: "PubMed 20k RCT (numbers replaced with @)"
+    files: ["train", "dev", "test"]
+    format: "pubmed200k"
+    map: { text: "sentence", label: "section", title: "pmid" }
+    tags: ["pubmed","abstracts","rct","sanitized"]
+
+  - slug: "Numbers_replaced_with_@"
+    title: "PubMed 200k RCT (numbers replaced with @)"
+    files: ["train", "dev", "test"]
+    format: "pubmed200k"
+    map: { text: "sentence", label: "section", title: "pmid" }
+    tags: ["pubmed","abstracts","rct","sanitized"]
+
+  ###########################################################################
+  # Drug / patient-facing review corpora
+  ###########################################################################
+  - slug: "drugs_side_effects_drugs_com"
+    title: "Drugs.com Reviews"
+    files: ["drugs_side_effects_drugs_com.csv"]
     format: "csv"
-    csv_delimiter: ","          # if semicolon-separated, set to ";"
-    text_cols: ["review"]
+    text_cols: ["review"]            # adjust column names if differ
     label_col: "condition"
-    extra_cols: ["rating","date","usefulCount","drugName"]
-    tags: ["otc","drug_experience"]
+    extra_cols: ["drugName","rating","date","usefulCount"]
+    tags: ["drug","otc","patient_review"]
     map:
       text: "review"
       label: "condition"
       title: "drugName"
 
-  # PUBMED 200k RCT (TXT) — label \t sentence, abstracts separated by blank lines
-  - slug: "pubmed_200k_rct"
-    title: "PubMed 200k RCT"
-    files:
-      - "files/train.txt"
-      - "files/dev.txt"
-      - "files/test.txt"
-    format: "pubmed200k"        # special reader implemented below
-    tags: ["pubmed","rct","abstract_sections"]
-    # mapping for the reader's emitted keys
+  - slug: "webmd"
+    title: "WebMD Reviews"
+    files: ["webmd.csv"]
+    format: "csv"
+    text_cols: ["review"]
+    label_col: "condition"
+    extra_cols: ["drug","rating","date"]
+    tags: ["drug","patient_review","otc"]
+    map: { text: "review", label: "condition", title: "drug" }
+
+  ###########################################################################
+  # Symptoms / disease mappings
+  ###########################################################################
+  - slug: "symptoms_df"
+    title: "Symptoms ↔ Disease (CSV)"
+    files: ["symptoms_df.csv"]
+    format: "csv"
+    text_cols: ["Symptom","Description"]    # if only "Symptom" exists, keep it
+    label_col: "Disease"
+    tags: ["symptom_graph"]
     map:
-      text: "sentence"
-      label: "section"          # BACKGROUND/OBJECTIVE/METHODS/RESULTS/CONCLUSIONS
-      title: "pmid"             # optional; the reader will synthesize an abstract id
+      text: ["Symptom","Description"]
+      label: "Disease"
+      title: "Disease"
+
+  - slug: "Symptom-severity"
+    title: "Symptom Severity"
+    files: ["Symptom-severity.csv"]
+    format: "csv"
+    text_cols: ["Symptom"]
+    label_col: "weight"
+    tags: ["symptom_graph","severity"]
+    map: { text: "Symptom", label: "weight", title: "Symptom" }
+
+  ###########################################################################
+  # Drug catalogs / details
+  ###########################################################################
+  - slug: "Medicine_Details"
+    title: "Medicine Details (XLSX)"
+    files: ["Medicine_Details.xlsx"]
+    format: "xlsx"
+    sheet: "Sheet1"                    # change if your workbook uses a different name
+    text_cols: ["Description"]
+    label_col: "DrugName"
+    extra_cols: ["Company","Dose","Form"]
+    tags: ["drug","details"]
+    map: { text: "Description", label: "DrugName", title: "DrugName" }
+
+  - slug: "medications"
+    title: "Medications (CSV)"
+    files: ["medications.csv"]
+    format: "csv"
+    text_cols: ["Description"]
+    label_col: "Medication"
+    tags: ["drug"]
+    map: { text: "Description", label: "Medication", title: "Medication" }
+
+  - slug: "Drugs_package"
+    title: "Drugs Package (XLSX)"
+    files: ["Drugs_package.xlsx"]
+    format: "xlsx"
+    sheet: 0                              # 0 = first sheet
+    text_cols: ["Text","Description"]     # adjust to actual columns
+    label_col: "Category"
+    tags: ["drug","package"]
+    map: { text: ["Text","Description"], label: "Category", title: "Category" }
+
+  - slug: "Drugs_product"
+    title: "Drugs Product (XLSX)"
+    files: ["Drugs_product.xlsx"]
+    format: "xlsx"
+    sheet: 0
+    text_cols: ["Description"]
+    label_col: "Product"
+    tags: ["drug","product"]
+    map: { text: "Description", label: "Product", title: "Product" }
+
+  ###########################################################################
+  # Quality/ratings (example workbook with multiple sheets)
+  ###########################################################################
+  - slug: "Star_ratings"
+    title: "Medicare Star Ratings (XLSX)"
+    files: ["Star_rating_spring_master_data.xlsx"]
+    format: "xlsx"
+    sheets: ["Domain","Summary"]          # merge these sheets; change to your sheet names
+    text_cols: ["Measure_Description"]
+    label_col: "Measure_ID"
+    tags: ["quality","ratings"]
+    map: { text: "Measure_Description", label: "Measure_ID", title: "Measure_ID" }
+
+  ###########################################################################
+  # NHANES (keep as separate shard if you plan to use)
+  ###########################################################################
+  - slug: "Nhans_2005_2006"
+    title: "NHANES 2005–2006 (CSV)"
+    files: ["Nhans_2005_2006.csv"]        # change to actual file name
+    format: "csv"
+    text_cols: ["Notes","Description"]    # pick a free-text field if present
+    label_col: null
+    tags: ["nhanes"]
+    map: { text: ["Notes","Description"], title: "Dataset" }
+
+  # Add more NHANES folders similarly, or delete this block if not used.
+
+  ###########################################################################
+  # OPTIONAL placeholders — uncomment/add once you confirm filenames
+  ###########################################################################
+  # - slug: "Drug_clean"
+  #   title: "Drug Clean (CSV)"
+  #   files: ["Drug_clean.csv"]
+  #   format: "csv"
+  #   text_cols: ["Text"]
+  #   label_col: "Category"
+  #   tags: ["drug"]
+  #   map: { text: "Text", label: "Category", title: "Category" }
+
+  # - slug: "Drugs_unfinished_package"
+  #   title: "Drugs Unfinished Package (XLSX)"
+  #   files: ["Drugs_unfinished_package.xlsx"]
+  #   format: "xlsx"
+  #   sheet: 0
+  #   text_cols: ["Text"]
+  #   label_col: "Category"
+  #   tags: ["drug"]
+  #   map: { text: "Text", label: "Category", title: "Category" }
