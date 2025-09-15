@@ -2,7 +2,6 @@
 chunk.py
 --------
 Utility for splitting long documents into overlapping chunks.
-Used for RAG indexing (FAISS).
 """
 
 from typing import List
