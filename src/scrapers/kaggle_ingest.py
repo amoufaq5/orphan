@@ -53,22 +53,53 @@ def _iter_pubmed200k(path: pathlib.Path) -> Iterable[Dict[str, Any]]:
                 "pmid": f"pm200k:{aid}",
             }
 
+# --------------------- Excel support (engine select) --------------
+def _pick_excel_engine(path: pathlib.Path) -> str:
+    """
+    Choose a pandas Excel engine based on file suffix.
+    .xlsx/.xlsm -> openpyxl
+    .xls        -> xlrd
+    """
+    suf = path.suffix.lower()
+    if suf in {".xlsx", ".xlsm"}:
+        return "openpyxl"
+    if suf == ".xls":
+        return "xlrd"
+    # default to openpyxl for unknown modern formats
+    return "openpyxl"
+
 def _iter_excel(path: pathlib.Path, sheet: Any = None, sheets: List[str] | None = None) -> Iterable[Dict[str, Any]]:
-    import pandas as pd  # heavy only when used
+    import pandas as pd
+
+    engine = _pick_excel_engine(path)
 
     def _df_iter(df):
         for rec in df.fillna("").to_dict(orient="records"):
             yield rec
 
+    def _read(sheet_name):
+        # Try chosen engine; if it fails, attempt a reasonable fallback.
+        try:
+            return pd.read_excel(path, sheet_name=sheet_name, engine=engine)
+        except Exception:
+            # Fallback order: openpyxl -> xlrd (helps if user installed only one)
+            for eng in (["openpyxl", "xlrd"] if engine != "openpyxl" else ["xlrd"]):
+                try:
+                    return pd.read_excel(path, sheet_name=sheet_name, engine=eng)
+                except Exception:
+                    continue
+            # Re-raise original if all fail
+            raise
+
     if sheets:
         for s in sheets:
             try:
-                df = pd.read_excel(path, sheet_name=s, engine=None)
+                df = _read(s)
                 yield from _df_iter(df)
             except Exception as e:
-                log.warning(f"Excel sheet '{s}' not found in {path.name}: {e}")
+                log.warning(f"Excel sheet '{s}' not readable in {path.name} (engine={engine}): {e}")
     else:
-        df = pd.read_excel(path, sheet_name=sheet or 0, engine=None)
+        df = _read(sheet or 0)  # 0 = first sheet
         yield from _df_iter(df)
 
 # --------------------- Format routing helpers ---------------------
@@ -80,7 +111,7 @@ def _guess_format(p: pathlib.Path) -> str:
         return "tsv"
     if s == ".jsonl":
         return "jsonl"
-    if s in {".xlsx", ".xls"}:
+    if s in {".xlsx", ".xls", ".xlsm"}:
         return "xlsx"
     if s == ".txt":
         return "pubmed200k"
