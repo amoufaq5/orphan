@@ -1,22 +1,12 @@
-"""
-run_build_index.py
-------------------
-Build FAISS retrieval index from the unified corpus.
-
-Corpus must be located in:
-    data/corpus/corpus.jsonl.gz   OR data/corpus/corpus.jsonl
-
-Index is saved to:
-    data/index/faiss/
-"""
-
 import pathlib, json, gzip, sys
 from src.rag.chunk import chunk_text
 from src.rag.embed_faiss import embed_and_store
 from src.utils.logger import get_logger
+from src.utils.config import load_yaml  # ✅ to load app.yaml
 
 log = get_logger("run_build_index")
 
+APP_CFG = pathlib.Path("conf/app.yaml")
 CORPUS_PATHS = [
     pathlib.Path("data/corpus/corpus.jsonl.gz"),
     pathlib.Path("data/corpus/corpus.jsonl")
@@ -39,6 +29,15 @@ def load_corpus() -> list[dict]:
     sys.exit(1)
 
 def main():
+    # Load config if available
+    chunk_size, overlap = 512, 50
+    if APP_CFG.exists():
+        cfg = load_yaml(APP_CFG)
+        rag_cfg = cfg.get("rag", {})
+        chunk_size = int(rag_cfg.get("chunk_size", chunk_size))
+        overlap = int(rag_cfg.get("chunk_overlap", overlap))
+        log.info(f"Using chunk_size={chunk_size}, overlap={overlap}")
+
     records = load_corpus()
     if not records:
         log.error("Corpus is empty — nothing to index.")
@@ -50,7 +49,7 @@ def main():
         text = rec.get("text") or ""
         if not text.strip():
             continue
-        for ch in chunk_text(text):
+        for ch in chunk_text(text, max_len=chunk_size, overlap=overlap):
             docs.append({
                 "id": rec.get("id"),
                 "title": rec.get("title"),
@@ -68,7 +67,9 @@ def main():
     meta = {
         "corpus_file": str([p for p in CORPUS_PATHS if p.exists()][0]),
         "records": len(records),
-        "chunks": len(docs)
+        "chunks": len(docs),
+        "chunk_size": chunk_size,
+        "chunk_overlap": overlap,
     }
     with open(INDEX_DIR / "metadata.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
