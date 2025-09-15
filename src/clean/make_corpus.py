@@ -1,10 +1,28 @@
-# src/clean/make_corpus.py
+"""
+make_corpus.py
+--------------
+Builds a unified training corpus from cleaned datasets.
+
+✅ Supports:
+  - Config-driven mode (-c conf/data.yaml)
+  - Explicit CLI args
+  - Both directories (glob *.jsonl*) and single files
+
+Example:
+    python -m src.clean.make_corpus -c conf/data.yaml
+    python -m src.clean.make_corpus --files data/cleaned/corpus.jsonl data/clean/kaggle_merged.jsonl --out data/corpus/corpus.jsonl.gz
+"""
+
 import argparse, pathlib, json, gzip, random, sys
 from typing import List, Dict, Any
 from src.utils.config import load_yaml
 from src.utils.logger import get_logger
 
 log = get_logger("make_corpus")
+
+# -------------------------------
+# Helpers
+# -------------------------------
 
 def iter_jsonl(path: pathlib.Path):
     opener = gzip.open if path.suffix.endswith(".gz") else open
@@ -13,13 +31,30 @@ def iter_jsonl(path: pathlib.Path):
             if line.strip():
                 yield json.loads(line)
 
+def _gather_inputs(entries: Dict[str, str]) -> List[pathlib.Path]:
+    """Accept both dirs and single files."""
+    inputs: List[pathlib.Path] = []
+    for name, path_str in entries.items():
+        if not path_str:
+            continue
+        p = pathlib.Path(path_str)
+        if not p.exists():
+            log.warning(f"[{name}] not found: {p}")
+            continue
+        if p.is_dir():
+            for f in p.glob("*.jsonl*"):
+                inputs.append(f)
+        elif p.is_file() and (".jsonl" in p.suffixes or p.suffix.endswith(".jsonl") or p.suffix.endswith(".gz")):
+            inputs.append(p)
+        else:
+            log.warning(f"[{name}] path not recognized: {p}")
+    return inputs
+
 def build_corpus(inputs: List[pathlib.Path], out_path: pathlib.Path,
                  min_chars: int, lang: str, shuffle: bool):
     records: List[Dict[str, Any]] = []
     for p in inputs:
-        if not p.exists():
-            log.warning(f"Missing file skipped: {p}")
-            continue
+        log.info(f"Reading {p}")
         for row in iter_jsonl(p):
             txt = (row.get("text") or "").strip()
             if len(txt) < min_chars:
@@ -27,6 +62,10 @@ def build_corpus(inputs: List[pathlib.Path], out_path: pathlib.Path,
             if lang and row.get("lang") and row["lang"].lower() != lang.lower():
                 continue
             records.append(row)
+
+    if not records:
+        log.error("No valid records found. Check your input files.")
+        sys.exit(1)
 
     if shuffle:
         random.shuffle(records)
@@ -39,26 +78,14 @@ def build_corpus(inputs: List[pathlib.Path], out_path: pathlib.Path,
 
     log.info(f"Corpus built: {out_path} (total={len(records)})")
 
-def _gather_from_dirs(dir_map: Dict[str, str]) -> List[pathlib.Path]:
-    inputs: List[pathlib.Path] = []
-    for name, d in dir_map.items():
-        if not d:
-            continue
-        dpath = pathlib.Path(d)
-        if not dpath.exists():
-            log.warning(f"[{name}] folder not found: {dpath}")
-            continue
-        for f in dpath.glob("*.jsonl*"):
-            inputs.append(f)
-    return inputs
+# -------------------------------
+# Main
+# -------------------------------
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pubmed_dir")
-    ap.add_argument("--ctgov_dir")
-    ap.add_argument("--openfda_dir")
-    ap.add_argument("--kaggle_dir")
-    ap.add_argument("--out")
+    ap.add_argument("--files", nargs="+", help="Explicit list of cleaned files or dirs")
+    ap.add_argument("--out", help="Output path (jsonl/jsonl.gz)")
     ap.add_argument("--min_chars", type=int, default=20)
     ap.add_argument("--lang", default="en")
     ap.add_argument("--shuffle", action="store_true")
@@ -67,30 +94,10 @@ def main(argv=None):
 
     if args.config:
         cfg = load_yaml(args.config)
-        if not isinstance(cfg, dict):
-            raise SystemExit(f"[make_corpus] Config is not a dict. Loaded type={type(cfg)} from {args.config}")
+        if not isinstance(cfg, dict) or "clean" not in cfg or "corpus" not in cfg:
+            raise SystemExit("[make_corpus] YAML missing required top-level keys: 'clean' and 'corpus'.")
 
-        # Helpful debug in case of YAML surprises
-        log.info(f"[make_corpus] Loaded keys from {args.config}: {list(cfg.keys())}")
-
-        if "clean" not in cfg or "corpus" not in cfg:
-            raise SystemExit(
-                "[make_corpus] YAML missing required top-level keys. "
-                "Expected 'clean' and 'corpus'. Example:\n"
-                "clean:\n  pubmed: data/clean/pubmed\n  ctgov: data/clean/ctgov\n"
-                "corpus:\n  out: data/corpus/corpus.jsonl.gz\n  min_chars: 20\n  lang: en"
-            )
-
-        dirs = {
-            "pubmed":  cfg["clean"].get("pubmed", ""),
-            "ctgov":   cfg["clean"].get("ctgov", ""),
-            "openfda": cfg["clean"].get("openfda", ""),
-            "kaggle":  cfg["clean"].get("kaggle", ""),
-        }
-        inputs = _gather_from_dirs(dirs)
-        if not inputs:
-            raise SystemExit("[make_corpus] No input files found under specified clean dirs.")
-
+        inputs = _gather_inputs(cfg["clean"])
         out = pathlib.Path(cfg["corpus"].get("out", "data/corpus/corpus.jsonl.gz"))
         build_corpus(
             inputs,
@@ -100,15 +107,11 @@ def main(argv=None):
             bool(cfg["corpus"].get("shuffle", True)),
         )
     else:
-        dirs = {
-            "pubmed":  args.pubmed_dir,
-            "ctgov":   args.ctgov_dir,
-            "openfda": args.openfda_dir,
-            "kaggle":  args.kaggle_dir,
-        }
-        inputs = _gather_from_dirs(dirs)
-        if not inputs:
-            raise SystemExit("[make_corpus] No input files found; supply directories or use -c conf/data.yaml.")
+        if not args.files:
+            raise SystemExit("Must supply either -c conf/data.yaml or --files paths")
+        inputs = []
+        for path in args.files:
+            inputs.extend(_gather_inputs({path: path}))
         out = pathlib.Path(args.out or "data/corpus/corpus.jsonl.gz")
         build_corpus(inputs, out, args.min_chars, args.lang, args.shuffle)
 
