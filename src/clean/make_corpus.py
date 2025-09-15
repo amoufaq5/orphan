@@ -1,10 +1,5 @@
 # src/clean/make_corpus.py
-"""
-Builds a unified training corpus from all cleaned datasets.
-Supports config-driven (-c conf/data.yaml) or explicit args.
-"""
-
-import argparse, pathlib, json, gzip, random
+import argparse, pathlib, json, gzip, random, sys
 from typing import List, Dict, Any
 from src.utils.config import load_yaml
 from src.utils.logger import get_logger
@@ -18,9 +13,13 @@ def iter_jsonl(path: pathlib.Path):
             if line.strip():
                 yield json.loads(line)
 
-def build_corpus(inputs: List[pathlib.Path], out_path: pathlib.Path, min_chars: int, lang: str, shuffle: bool):
+def build_corpus(inputs: List[pathlib.Path], out_path: pathlib.Path,
+                 min_chars: int, lang: str, shuffle: bool):
     records: List[Dict[str, Any]] = []
     for p in inputs:
+        if not p.exists():
+            log.warning(f"Missing file skipped: {p}")
+            continue
         for row in iter_jsonl(p):
             txt = (row.get("text") or "").strip()
             if len(txt) < min_chars:
@@ -40,6 +39,19 @@ def build_corpus(inputs: List[pathlib.Path], out_path: pathlib.Path, min_chars: 
 
     log.info(f"Corpus built: {out_path} (total={len(records)})")
 
+def _gather_from_dirs(dir_map: Dict[str, str]) -> List[pathlib.Path]:
+    inputs: List[pathlib.Path] = []
+    for name, d in dir_map.items():
+        if not d:
+            continue
+        dpath = pathlib.Path(d)
+        if not dpath.exists():
+            log.warning(f"[{name}] folder not found: {dpath}")
+            continue
+        for f in dpath.glob("*.jsonl*"):
+            inputs.append(f)
+    return inputs
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--pubmed_dir")
@@ -50,32 +62,53 @@ def main(argv=None):
     ap.add_argument("--min_chars", type=int, default=20)
     ap.add_argument("--lang", default="en")
     ap.add_argument("--shuffle", action="store_true")
-    ap.add_argument("-c", "--config", help="Path to YAML config")
+    ap.add_argument("-c", "--config", help="Path to YAML config (e.g., conf/data.yaml)")
     args = ap.parse_args(argv)
 
     if args.config:
         cfg = load_yaml(args.config)
-        inputs = []
-        for key in ["pubmed", "ctgov", "openfda", "kaggle"]:
-            d = pathlib.Path(cfg["clean"].get(key, ""))
-            if d.exists():
-                for f in d.glob("*.jsonl*"):
-                    inputs.append(f)
-        out = pathlib.Path(cfg["corpus"]["out"])
+        if not isinstance(cfg, dict):
+            raise SystemExit(f"[make_corpus] Config is not a dict. Loaded type={type(cfg)} from {args.config}")
+
+        # Helpful debug in case of YAML surprises
+        log.info(f"[make_corpus] Loaded keys from {args.config}: {list(cfg.keys())}")
+
+        if "clean" not in cfg or "corpus" not in cfg:
+            raise SystemExit(
+                "[make_corpus] YAML missing required top-level keys. "
+                "Expected 'clean' and 'corpus'. Example:\n"
+                "clean:\n  pubmed: data/clean/pubmed\n  ctgov: data/clean/ctgov\n"
+                "corpus:\n  out: data/corpus/corpus.jsonl.gz\n  min_chars: 20\n  lang: en"
+            )
+
+        dirs = {
+            "pubmed":  cfg["clean"].get("pubmed", ""),
+            "ctgov":   cfg["clean"].get("ctgov", ""),
+            "openfda": cfg["clean"].get("openfda", ""),
+            "kaggle":  cfg["clean"].get("kaggle", ""),
+        }
+        inputs = _gather_from_dirs(dirs)
+        if not inputs:
+            raise SystemExit("[make_corpus] No input files found under specified clean dirs.")
+
+        out = pathlib.Path(cfg["corpus"].get("out", "data/corpus/corpus.jsonl.gz"))
         build_corpus(
             inputs,
             out,
-            cfg["corpus"].get("min_chars", 20),
+            int(cfg["corpus"].get("min_chars", 20)),
             cfg["corpus"].get("lang", "en"),
-            cfg["corpus"].get("shuffle", True),
+            bool(cfg["corpus"].get("shuffle", True)),
         )
     else:
-        inputs = []
-        for d in [args.pubmed_dir, args.ctgov_dir, args.openfda_dir, args.kaggle_dir]:
-            if d:
-                dpath = pathlib.Path(d)
-                for f in dpath.glob("*.jsonl*"):
-                    inputs.append(f)
+        dirs = {
+            "pubmed":  args.pubmed_dir,
+            "ctgov":   args.ctgov_dir,
+            "openfda": args.openfda_dir,
+            "kaggle":  args.kaggle_dir,
+        }
+        inputs = _gather_from_dirs(dirs)
+        if not inputs:
+            raise SystemExit("[make_corpus] No input files found; supply directories or use -c conf/data.yaml.")
         out = pathlib.Path(args.out or "data/corpus/corpus.jsonl.gz")
         build_corpus(inputs, out, args.min_chars, args.lang, args.shuffle)
 
