@@ -1,11 +1,45 @@
-from __future__ import annotations
-from typing import Dict, List
+"""
+chunk.py
+--------
+Utility for splitting long documents into overlapping chunks.
+Used for RAG indexing (FAISS).
+"""
 
-def simple_chunk(text: str, max_len: int = 1200, overlap: int = 100) -> List[str]:
-    words = text.split()
-    chunks, i = [], 0
-    while i < len(words):
-        j = min(len(words), i + max_len)
-        chunks.append(" ".join(words[i:j]))
-        i = j - overlap if j - overlap > i else j
+from typing import List
+
+def chunk_text(
+    text: str,
+    max_len: int = 512,
+    overlap: int = 50,
+    sep: str = " "
+) -> List[str]:
+    """
+    Split `text` into overlapping chunks.
+
+    Args:
+        text: raw string
+        max_len: max characters per chunk
+        overlap: overlap characters between consecutive chunks
+        sep: separator (default: space)
+
+    Returns:
+        List of chunk strings
+    """
+    if not text:
+        return []
+
+    text = text.strip().replace("\n", " ")
+    if len(text) <= max_len:
+        return [text]
+
+    chunks: List[str] = []
+    start = 0
+    while start < len(text):
+        end = min(start + max_len, len(text))
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end == len(text):
+            break
+        start = max(0, end - overlap)
     return chunks
