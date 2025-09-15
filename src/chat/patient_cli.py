@@ -1,158 +1,101 @@
 # src/chat/patient_cli.py
-import os, sys, faiss, pandas as pd, numpy as np, textwrap, re
-from typing import List, Dict
-from sentence_transformers import SentenceTransformer
+"""
+Interactive CLI to talk 'as a patient'.
+Collects ASMETHOD/WWHAM answers, runs local inference endpoint or direct function.
+Set API_URL in conf/app.yaml to call the FastAPI server; otherwise imports run_inference.
+"""
 
-FAISS_DIR = os.getenv("FAISS_DIR", "./out/faiss")  # where embed_faiss stored index/model/meta
-INDEX_PATH = os.path.join(FAISS_DIR, "index.faiss")
-META_PATH  = os.path.join(FAISS_DIR, "chunks.parquet")
-MODEL_TXT  = os.path.join(FAISS_DIR, "model.txt")
+from __future__ import annotations
+import json
+import requests
+from typing import Dict, Any, Tuple
 
-EMERGENCY_PATTERNS = [
-    r"severe (chest pain|trouble breathing|shortness of breath)",
-    r"faint(ed|ing)", r"stroke", r"suicid(al|e|al ideation)", r"uncontrollable bleeding",
-    r"confusion.*sudden", r"one side.*weak(ness)?", r"blue lips", r"seizure(s)?"
-]
-EMERGENCY_HINT = (
-    "This tool can only provide general information and cannot diagnose you.\n"
-    "If you think this may be an emergency, please call local emergency services "
-    "or go to the nearest emergency department now."
-)
+from src.chat.triage import ASMETHOD, WWHAM, triage
+from src.utils.config import load_yaml
 
-def l2_normalize(x: np.ndarray) -> np.ndarray:
-    n = np.linalg.norm(x, axis=1, keepdims=True) + 1e-12
-    return x / n
+CFG = load_yaml("conf/app.yaml")
+API_URL = (CFG.get("api") or {}).get("url")  # e.g., "http://127.0.0.1:8000/infer"
 
-def load_retriever():
-    if not (os.path.exists(INDEX_PATH) and os.path.exists(META_PATH) and os.path.exists(MODEL_TXT)):
-        print("FAISS index not found. Build it first:\n"
-              "  python -m src.rag.embed_faiss --corpus .\\data\\cleaned\\corpus.jsonl --outdir .\\out\\faiss", file=sys.stderr)
-        sys.exit(1)
-    index = faiss.read_index(INDEX_PATH)
-    meta  = pd.read_parquet(META_PATH)
-    model_name = open(MODEL_TXT, "r", encoding="utf-8").read().strip()
-    embedder = SentenceTransformer(model_name)
-    return index, meta, embedder
+def ask(prompt: str) -> str:
+    return input(prompt).strip()
 
-def retrieve(index, meta: pd.DataFrame, embedder, query: str, k: int = 6) -> List[Dict]:
-    qv = embedder.encode([query], convert_to_numpy=True).astype("float32")
-    qv = l2_normalize(qv)
-    scores, idxs = index.search(qv, k)
-    idxs = idxs[0]; scores = scores[0]
-    out = []
-    for i, s in zip(idxs, scores):
-        row = meta.iloc[int(i)]
-        out.append({
-            "doc_id": row.get("doc_id"),
-            "title": row.get("title"),
-            "seed_term": row.get("seed_term"),
-            "source": row.get("source"),
-            "chunk_id": row.get("chunk_id"),
-            "text": row.get("text"),
-            "score": float(s),
-        })
-    return out
+def collect_asmethod() -> Tuple[ASMETHOD, WWHAM]:
+    print("\nI’ll ask a few quick safety questions (it takes ~30 seconds):")
+    age = ask("Age (or type 'pregnant' if applicable): ")
+    who = ask("Who is this for (you / someone else)?: ")
+    how_long = ask("How long has this been going on?: ")
+    what = ask("Main symptoms (comma-separated, short): ")
+    meds = ask("Current medicines (comma-separated; blank if none): ")
+    other = ask("Any illnesses/allergies/conditions? (comma-separated; blank if none): ")
+    danger = ask("Any worrying signs (e.g., severe chest pain, bleeding, confusion)? ")
 
-def format_context(chunks: List[Dict], max_chars_per=900) -> str:
-    ctx_parts = []
-    for ch in chunks:
-        snippet = (ch["text"] or "")[:max_chars_per]
-        ctx_parts.append(
-            f"[{ch['doc_id']}] {ch['title']}\n"
-            f"{snippet}\n"
-        )
-    return "\n".join(ctx_parts)
+    asmethod = ASMETHOD(
+        age=age,
+        self_or_other=who,
+        meds=[m.strip() for m in meds.split(",") if m.strip()],
+        extra_meds=[],
+        time_course=how_long,
+        history=[x.strip() for x in other.split(",") if x.strip()],
+        other_symptoms=[s.strip() for s in what.split(",") if s.strip()],
+        danger_symptoms=[danger] if danger else []
+    )
+    wwham = WWHAM(
+        who=who,
+        what_symptoms=what,
+        how_long=how_long,
+        action_taken="",
+        medication_used=""
+    )
+    return asmethod, wwham
 
-def detect_emergency(user_text: str) -> bool:
-    t = user_text.lower()
-    for pat in EMERGENCY_PATTERNS:
-        if re.search(pat, t):
-            return True
-    return False
-
-def try_llm(prompt: str) -> str:
-    """
-    Optional: call OpenAI if OPENAI_API_KEY is set. Otherwise, returns "".
-    """
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return ""
-    try:
-        # OpenAI v1+ style
-        from openai import OpenAI
-        client = OpenAI()
-        model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
-        resp = client.chat.completions.create(
-            model=model,
-            temperature=0.2,
-            max_tokens=650,
-            messages=[
-                {"role": "system", "content": (
-                    "You are a careful, empathetic health information assistant. "
-                    "Speak in plain language. You are NOT a doctor and this is not medical advice. "
-                    "Use ONLY the provided context to answer and include inline citations as [PMID:…] or [NCT:…]. "
-                    "If the context is insufficient, say so briefly and suggest what info would help. "
-                    "Encourage seeing a clinician for diagnosis/treatment. Avoid drug dosing."
-                )},
-                {"role": "user", "content": prompt},
-            ],
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        return f"(LLM call failed; showing retrieved evidence only)\n{e}"
+def call_api(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not API_URL:
+        # Fallback: local run_inference
+        from src.api.infer import run_inference  # lazy import
+        return run_inference(payload)
+    r = requests.post(API_URL, json=payload, timeout=60)
+    r.raise_for_status()
+    return r.json()
 
 def main():
-    print("Loading retrieval index…")
-    index, meta, embedder = load_retriever()
-    print("Ready. Type your concern in natural language. Type 'exit' to quit.\n")
+    print("Patient CLI — Orphan\nType 'quit' to exit.")
+    persona = (CFG.get("default_persona") or "patient")
 
     while True:
+        text = ask("\nTell me what’s going on: ")
+        if text.lower() in {"q", "quit", "exit"}:
+            print("Bye! Take care.")
+            break
+
+        asm, wwm = collect_asmethod()
+        # quick local triage echo (API will triage again too)
+        tri = triage(asm, wwm)
+        if not tri.safe:
+            print(f"\n⚠️  Please see a clinician ({tri.level}). Reason: {', '.join(tri.reasons)}")
+            continue
+
+        payload = {
+            "text": text,
+            "asmethod": asm.__dict__,
+            "wwham": wwm.__dict__,
+            "persona": persona
+        }
         try:
-            user = input("You: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nBye!")
-            break
-        if not user:
-            continue
-        if user.lower() in {"exit", "quit", ":q"}:
-            print("Bye!")
-            break
-
-        if detect_emergency(user):
-            print(f"\n⚠️  {EMERGENCY_HINT}\n")
-            # still retrieve, but show the safety note first
-
-        # Retrieve evidence
-        hits = retrieve(index, meta, embedder, user, k=6)
-        if not hits:
-            print("\nI couldn’t find relevant information in the local corpus yet.\n")
+            res = call_api(payload)
+        except Exception as e:
+            print(f"\nError contacting API: {e}")
             continue
 
-        context = format_context(hits)
-        citations = ", ".join(sorted({h["doc_id"] for h in hits if h.get("doc_id")}))
-        prompt = (
-            "Context (evidence):\n"
-            + context
-            + "\n\nTask: Using only the context, answer the patient's question empathetically, "
-              "in simple language. Include source citations inline like [PMID:xxxxx] or [NCT:xxxxx]. "
-              "Finish with a brief 'What to watch for / When to seek care' section."
-            + "\n\nPatient question:\n" + user
-        )
-
-        # Try LLM; if unavailable, show a retrieval-first fallback
-        answer = try_llm(prompt)
-        if answer:
-            print("\nAssistant:\n" + answer + "\n")
-        else:
-            # Retrieval-only fallback
-            print("\nAssistant (evidence-based summary):")
-            print("I’m not connected to a language model right now, but here are the most relevant sources I found:\n")
-            for i, h in enumerate(hits, 1):
-                print(f"{i}. [{h['doc_id']}] {h['title']}  — source={h['source']}  (score={h['score']:.3f})")
-            print("\n" + textwrap.fill(
-                "This information is educational and not a medical diagnosis. If symptoms are severe, worsening, or "
-                "you’re worried, please seek in-person medical care.", width=88))
-            print()
+        print("\n— Response —")
+        print(res.get("answer", "(no answer)"))
+        tri_info = res.get("triage", {})
+        if tri_info:
+            print(f"\n[triage: {tri_info.get('level','OTC')}]")
+        cits = res.get("citations", [])
+        if cits:
+            print("\nSources:")
+            for i, c in enumerate(cits, 1):
+                print(f" {i}. {c}")
 
 if __name__ == "__main__":
     main()
