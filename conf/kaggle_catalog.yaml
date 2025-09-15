@@ -1,0 +1,41 @@
+# conf/kaggle_catalog.yaml
+defaults:
+  lang: "en"
+  license: "unknown"
+  pii_mask: true
+  max_rows: 0         # 0 = no cap
+  shuffle: true
+  csv_delimiter: ","  # default delimiter for CSVs
+
+datasets:
+  # EXAMPLE CSV dataset
+  - slug: "drug_reviews"
+    title: "Drug Reviews (Kaggle)"
+    files:
+      - "files/drugsCom_raw/drugsComTrain_raw.csv"   # CSV
+      - "files/drugsCom_raw/drugsComTest_raw.csv"
+    format: "csv"
+    csv_delimiter: ","          # if semicolon-separated, set to ";"
+    text_cols: ["review"]
+    label_col: "condition"
+    extra_cols: ["rating","date","usefulCount","drugName"]
+    tags: ["otc","drug_experience"]
+    map:
+      text: "review"
+      label: "condition"
+      title: "drugName"
+
+  # PUBMED 200k RCT (TXT) — label \t sentence, abstracts separated by blank lines
+  - slug: "pubmed_200k_rct"
+    title: "PubMed 200k RCT"
+    files:
+      - "files/train.txt"
+      - "files/dev.txt"
+      - "files/test.txt"
+    format: "pubmed200k"        # special reader implemented below
+    tags: ["pubmed","rct","abstract_sections"]
+    # mapping for the reader's emitted keys
+    map:
+      text: "sentence"
+      label: "section"          # BACKGROUND/OBJECTIVE/METHODS/RESULTS/CONCLUSIONS
+      title: "pmid"             # optional; the reader will synthesize an abstract id
