@@ -1,18 +1,24 @@
 # src/scrapers/kaggle_ingest.py
 import csv, json, gzip, pathlib, random
-from typing import List, Dict, Any, Iterable, Iterator, Optional
+from typing import List, Dict, Any, Iterable
 from src.utils.config import load_yaml
 from src.utils.logger import get_logger
-from src.utils.pii import mask_text  # if missing, create a no-op that returns input
 
 log = get_logger("kaggle_ingest")
 
+# ---- Optional PII masking (no-op fallback) ----
+try:
+    from src.utils.pii import mask_text  # type: ignore
+except Exception:
+    def mask_text(s: str) -> str: return s  # no-op
+
+# ---------------- Readers ----------------
 def _iter_csv(path: pathlib.Path, delimiter: str = ",") -> Iterable[Dict[str, Any]]:
     with path.open("r", encoding="utf-8", newline="") as f:
         yield from csv.DictReader(f, delimiter=delimiter)
 
 def _iter_tsv(path: pathlib.Path) -> Iterable[Dict[str, Any]]:
-    return _iter_csv(path, delimiter="\t")
+    yield from _iter_csv(path, delimiter="\t")
 
 def _iter_jsonl(path: pathlib.Path) -> Iterable[Dict[str, Any]]:
     with path.open("r", encoding="utf-8") as f:
@@ -25,7 +31,7 @@ def _iter_pubmed200k(path: pathlib.Path) -> Iterable[Dict[str, Any]]:
     """
     Each non-empty line: SECTION<TAB>SENTENCE
     Abstracts separated by blank lines.
-    Emits rows with: {"abstract_id": int, "section": str, "sentence": str, "pmid": str}
+    Emits rows: {"abstract_id": int, "section": str, "sentence": str, "pmid": str}
     """
     aid = 0
     with path.open("r", encoding="utf-8") as f:
@@ -34,21 +40,47 @@ def _iter_pubmed200k(path: pathlib.Path) -> Iterable[Dict[str, Any]]:
             if not line:
                 aid += 1
                 continue
-            # Expect "LABEL\tsentence"
-            if "\t" not in line:
-                # fallback: treat entire line as sentence, unknown section
-                section, sent = "UNKNOWN", line
-            else:
+            if "\t" in line:
                 section, sent = line.split("\t", 1)
+            else:
+                section, sent = "UNKNOWN", line
             yield {
                 "abstract_id": aid,
                 "section": section.strip(),
                 "sentence": sent.strip(),
                 "pmid": f"pm200k:{aid}"
             }
-        # final abstract id increment not needed; last group handled by blank line
 
-def _iter_rows(path: pathlib.Path, fmt: str, cfg: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
+def _iter_excel(path: pathlib.Path, sheet: str | None = None, sheets: List[str] | None = None) -> Iterable[Dict[str, Any]]:
+    """
+    Uses pandas to read .xlsx/.xls. Returns dict rows across one or more sheets.
+    """
+    import pandas as pd  # heavy import here to keep CLI light when unused
+
+    def _df_iter(df):
+        for rec in df.fillna("").to_dict(orient="records"):
+            yield rec
+
+    if sheets:
+        for s in sheets:
+            df = pd.read_excel(path, sheet_name=s, engine=None)  # auto chooses openpyxl/xlrd
+            yield from _df_iter(df)
+    else:
+        df = pd.read_excel(path, sheet_name=sheet or 0, engine=None)  # 0 = first sheet
+        yield from _df_iter(df)
+
+# --------------- Format router ---------------
+def _guess_format_from_suffix(p: pathlib.Path) -> str:
+    suf = p.suffix.lower()
+    if suf in {".csv"}: return "csv"
+    if suf in {".tsv"}: return "tsv"
+    if suf in {".jsonl"}: return "jsonl"
+    if suf in {".xlsx", ".xls"}: return "xlsx"
+    if suf in {".txt"}: return "pubmed200k"  # for your PubMed RCT dumps
+    return "csv"
+
+def _iter_rows(path: pathlib.Path, cfg: Dict[str, Any], declared_fmt: str | None) -> Iterable[Dict[str, Any]]:
+    fmt = (declared_fmt or _guess_format_from_suffix(path)).lower()
     if fmt == "csv":
         delim = cfg.get("csv_delimiter", ",")
         yield from _iter_csv(path, delimiter=delim)
@@ -56,11 +88,14 @@ def _iter_rows(path: pathlib.Path, fmt: str, cfg: Dict[str, Any]) -> Iterable[Di
         yield from _iter_tsv(path)
     elif fmt == "jsonl":
         yield from _iter_jsonl(path)
+    elif fmt in {"xlsx", "excel"}:
+        yield from _iter_excel(path, sheet=cfg.get("sheet"), sheets=cfg.get("sheets"))
     elif fmt == "pubmed200k":
         yield from _iter_pubmed200k(path)
     else:
-        raise ValueError(f"Unsupported format: {fmt} for {path}")
+        raise ValueError(f"Unsupported format '{fmt}' for file {path}")
 
+# --------------- Mapping ----------------
 def _coalesce_text(row: Dict[str, Any], cols: Any) -> str:
     if isinstance(cols, list):
         parts = [str(row.get(c, "")).strip() for c in cols if row.get(c)]
@@ -69,16 +104,13 @@ def _coalesce_text(row: Dict[str, Any], cols: Any) -> str:
 
 def _map_record(cfg: Dict[str, Any], row: Dict[str, Any], slug: str) -> Dict[str, Any]:
     mp = cfg.get("map", {})
-    # Prefer explicit map.text; else fall back to text_cols
     text = _coalesce_text(row, mp.get("text") or cfg.get("text_cols"))
-    label_key = mp.get("label")
-    label = row.get(label_key) if label_key else None
+    if not text:
+        return {}
+    label_key = mp.get("label") or cfg.get("label_col")
     title_key = mp.get("title")
-    title = str(row.get(title_key)) if title_key else None
-
-    # fallback title
-    if not title:
-        title = cfg.get("title") or slug
+    label = row.get(label_key) if label_key else None
+    title = str(row.get(title_key)) if title_key else (cfg.get("title") or slug)
 
     rec = {
         "id": f"kaggle::{slug}::{hash(text) & 0xffffffff:x}",
@@ -92,6 +124,7 @@ def _map_record(cfg: Dict[str, Any], row: Dict[str, Any], slug: str) -> Dict[str
     }
     return rec
 
+# --------------- Main ingest ----------------
 def ingest(catalog_path: str = "conf/kaggle_catalog.yaml",
            root_raw: str = "data/raw/kaggle",
            out_path: str = "data/clean/kaggle_merged.jsonl.gz"):
@@ -103,22 +136,31 @@ def ingest(catalog_path: str = "conf/kaggle_catalog.yaml",
     for ds in items:
         slug = ds["slug"]
         cfg = {**defaults, **ds}
-        fmt = cfg.get("format", "csv")
+        declared_fmt = cfg.get("format")
         max_rows = int(cfg.get("max_rows", 0))
-        pii_mask = bool(cfg.get("pii_mask", True))
+        pii_mask_flag = bool(cfg.get("pii_mask", True))
 
         total_for_ds = 0
         for rel in cfg["files"]:
             p = pathlib.Path(root_raw) / slug / rel
-            if not p.exists():
-                log.warning(f"Missing file: {p}")
+            if p.is_dir():
+                log.warning(f"Path is a directory, expected file: {p}")
                 continue
+            if not p.exists():
+                # also try without 'files/' prefix if user omitted it
+                alt = pathlib.Path(root_raw) / slug / "files" / rel
+                if alt.exists():
+                    p = alt
+                else:
+                    log.warning(f"Missing file: {p}")
+                    continue
+
             n = 0
-            for row in _iter_rows(p, fmt, cfg):
+            for row in _iter_rows(p, cfg, declared_fmt):
                 rec = _map_record(cfg, row, slug)
-                if not rec["text"] or len(rec["text"]) < 10:
-                    continue  # drop trivial lines
-                if pii_mask:
+                if not rec or len(rec["text"]) < 10:
+                    continue
+                if pii_mask_flag:
                     rec["text"] = mask_text(rec["text"])
                     if rec.get("title"):
                         rec["title"] = mask_text(rec["title"])
