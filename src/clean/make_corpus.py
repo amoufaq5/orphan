@@ -1,163 +1,70 @@
 # src/clean/make_corpus.py
-import os, re, json, glob, argparse
-from typing import Dict, Any, Iterable
+"""
+Builds a unified corpus from cleaned datasets.
+Supports both explicit args and -c conf/data.yaml style.
+"""
+import argparse, pathlib, json, gzip, random, sys
+from typing import List, Dict, Any
+from src.utils.config import load_yaml
+from src.utils.logger import get_logger
 
-def iter_jsonl(path: str) -> Iterable[Dict[str, Any]]:
-    with open(path, "r", encoding="utf-8") as f:
+log = get_logger("make_corpus")
+
+def iter_jsonl(path: pathlib.Path):
+    if not path.exists(): return
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", encoding="utf-8") as f:
         for line in f:
-            line = line.strip()
-            if not line: 
-                continue
-            yield json.loads(line)
+            if line.strip():
+                yield json.loads(line)
 
-def safe_join(parts):
-    return "\n\n".join([p for p in parts if p and str(p).strip()])
-
-def normalize_pubmed(in_dir: str):
-    for p in sorted(glob.glob(os.path.join(in_dir, "*.jsonl"))):
-        # infer seed term from filename: "<term>_0001.jsonl"
-        m = re.search(r"([A-Za-z0-9_\-]+)_\d+\.jsonl$", os.path.basename(p))
-        seed_term = m.group(1).replace("_", " ") if m else None
+def build_corpus(inputs: List[pathlib.Path], out_path: pathlib.Path, min_chars: int, lang: str):
+    out: List[Dict[str, Any]] = []
+    for p in inputs:
         for row in iter_jsonl(p):
-            pmid = row.get("pmid")
-            title = row.get("title")
-            abstract = row.get("abstract")
-            text = safe_join([title, abstract])
-            if not text:
+            txt = (row.get("text") or "").strip()
+            if len(txt) < min_chars: continue
+            if lang and row.get("lang") and row["lang"].lower() != lang.lower():
                 continue
-            yield {
-                "id": f"PMID:{pmid}" if pmid else None,
-                "source": "pubmed",
-                "seed_term": seed_term,
-                "title": title,
-                "text": text,
-                "meta": {
-                    "journal": row.get("journal"),
-                    "pub_date": row.get("pub_date"),
-                    "authors": row.get("authors"),
-                    "mesh": row.get("mesh"),
-                    "keywords": row.get("keywords"),
-                    "doi": row.get("doi"),
-                },
-            }
+            out.append(row)
+    random.shuffle(out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    opener = gzip.open if out_path.suffix.endswith(".gz") else open
+    with opener(out_path, "wt", encoding="utf-8") as f:
+        for r in out:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    log.info(f"Wrote {out_path} (n={len(out)})")
 
-def normalize_ctgov(in_dir: str):
-    for p in sorted(glob.glob(os.path.join(in_dir, "*.jsonl"))):
-        m = re.search(r"([A-Za-z0-9_\-]+)_\d+-?\d*\.jsonl$", os.path.basename(p))
-        seed_term = m.group(1).replace("_", " ") if m else None
-        for row in iter_jsonl(p):
-            # v2 raw study dict from scraper
-            # try common paths; tolerate missing fields
-            nct = None
-            try:
-                nct = (
-                    row.get("protocolSection", {})
-                       .get("identificationModule", {})
-                       .get("nctId")
-                ) or row.get("nctId")
-            except Exception:
-                pass
-            id_ = f"NCT:{nct}" if nct else None
-            brief = None
-            official = None
-            try:
-                ident = row.get("protocolSection", {}).get("identificationModule", {})
-                brief = ident.get("briefTitle")
-                official = ident.get("officialTitle")
-            except Exception:
-                pass
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--pubmed_dir")
+    ap.add_argument("--ctgov_dir")
+    ap.add_argument("--openfda_dir")
+    ap.add_argument("--kaggle_dir")
+    ap.add_argument("--out", required=False)
+    ap.add_argument("--min_chars", type=int, default=20)
+    ap.add_argument("--lang", default="en")
+    ap.add_argument("-c", "--config", help="YAML config path")
+    args = ap.parse_args(argv)
 
-            outcomes = []
-            try:
-                pos = (row.get("protocolSection", {})
-                          .get("outcomesModule", {})
-                          .get("primaryOutcomes")) or []
-                for po in pos:
-                    m = po.get("measure") or po.get("description") or po.get("name")
-                    if m: outcomes.append(m)
-            except Exception:
-                pass
-
-            text = safe_join([
-                brief or official,
-                f"Primary outcomes: { '; '.join(outcomes) }" if outcomes else None
-            ])
-            if not text:
-                continue
-
-            # status & dates
-            status = None
-            first_posted = None
-            last_update = None
-            try:
-                status_mod = row.get("protocolSection", {}).get("statusModule", {})
-                status = status_mod.get("overallStatus")
-                fps = status_mod.get("studyFirstPostDateStruct", {})
-                first_posted = fps.get("date")
-                lup = status_mod.get("lastUpdatePostDateStruct", {})
-                last_update = lup.get("date")
-            except Exception:
-                pass
-
-            # conditions
-            conds = None
-            try:
-                conds = row.get("protocolSection", {}).get("conditionsModule", {}).get("conditions")
-            except Exception:
-                pass
-
-            yield {
-                "id": id_,
-                "source": "ctgov",
-                "seed_term": seed_term,
-                "title": brief or official,
-                "text": text,
-                "meta": {
-                    "overall_status": status,
-                    "first_posted_date": first_posted,
-                    "last_update_posted_date": last_update,
-                    "conditions": conds,
-                },
-            }
-
-def main():
-    ap = argparse.ArgumentParser(description="Unify PubMed + CTGov shards into a single corpus.jsonl")
-    ap.add_argument("--pubmed_dir", default="./data/raw/pubmed")
-    ap.add_argument("--ctgov_dir", default="./data/raw/clinicaltrials")
-    ap.add_argument("--out", default="./data/cleaned/corpus.jsonl")
-    ap.add_argument("--min_chars", type=int, default=400, help="Filter very short texts")
-    ap.add_argument("--lang", default="en", help="(optional) lang filter placeholder")
-    args = ap.parse_args()
-
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    seen = set()
-    kept = 0
-
-    with open(args.out, "w", encoding="utf-8") as out:
-        # PubMed
-        for rec in normalize_pubmed(args.pubmed_dir):
-            if not rec["text"] or len(rec["text"]) < args.min_chars:
-                continue
-            # exact dedupe by id + title hash
-            key = (rec["id"], rec["title"])
-            if key in seen:
-                continue
-            seen.add(key)
-            out.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            kept += 1
-
-        # CTGov
-        for rec in normalize_ctgov(args.ctgov_dir):
-            if not rec["text"] or len(rec["text"]) < args.min_chars:
-                continue
-            key = (rec["id"], rec["title"])
-            if key in seen:
-                continue
-            seen.add(key)
-            out.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            kept += 1
-
-    print(f"OK: wrote {kept} records → {args.out}")
+    if args.config:
+        cfg = load_yaml(args.config)
+        paths = []
+        for key in ["pubmed", "ctgov", "openfda", "kaggle"]:
+            d = pathlib.Path(cfg["clean"].get(key,""))
+            if d and d.exists():
+                for f in d.glob("*.jsonl*"):
+                    paths.append(f)
+        out = pathlib.Path(cfg["corpus"]["out"])
+        build_corpus(paths, out, cfg["corpus"].get("min_chars", 20), cfg["corpus"].get("lang","en"))
+    else:
+        paths = []
+        for d in [args.pubmed_dir, args.ctgov_dir, args.openfda_dir, args.kaggle_dir]:
+            if d:
+                for f in pathlib.Path(d).glob("*.jsonl*"):
+                    paths.append(f)
+        out = pathlib.Path(args.out or "data/corpus/corpus.jsonl.gz")
+        build_corpus(paths, out, args.min_chars, args.lang)
 
 if __name__ == "__main__":
     main()
