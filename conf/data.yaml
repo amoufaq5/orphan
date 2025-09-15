@@ -1,11 +1,8 @@
-# conf/data.yaml
-# Defines where cleaned datasets live and how to merge them into one corpus.
-
 clean:
-  pubmed: "data/clean/pubmed"
-  ctgov: "data/clean/ctgov"
-  openfda: "data/clean/openfda"
-  kaggle: "data/clean/kaggle"
+  pubmed:  "data/cleaned/pubmed"      # ← update to your real folder
+  ctgov:   "data/cleaned/ctgov"
+  openfda: "data/cleaned/openfda"
+  kaggle:  "data/clean/kaggle"        # if you ran kaggle_ingest.py
 
 corpus:
   out: "data/corpus/corpus.jsonl.gz"
