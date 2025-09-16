@@ -1,8 +1,18 @@
-import pathlib, json, gzip, sys
+"""
+run_build_index.py
+------------------
+Shard-aware FAISS index builder with ETA + progress logs.
+
+- Loads corpus from data/corpus/corpus.jsonl(.gz)
+- Splits into shards (default: 1.5M chunks/shard)
+- Each shard is saved under data/index/faiss/shard_xx/
+"""
+
+import pathlib, json, gzip, sys, time, math
 from src.rag.chunk import chunk_text
 from src.rag.embed_faiss import embed_and_store
 from src.utils.logger import get_logger
-from src.utils.config import load_yaml  # ✅ to load app.yaml
+from src.utils.config import load_yaml
 
 log = get_logger("run_build_index")
 
@@ -12,6 +22,12 @@ CORPUS_PATHS = [
     pathlib.Path("data/corpus/corpus.jsonl")
 ]
 INDEX_DIR = pathlib.Path("data/index/faiss")
+
+MAX_PER_SHARD = 1_500_000  # vectors per shard (≈2.5GB)
+
+# -------------------------------
+# Helpers
+# -------------------------------
 
 def iter_jsonl(path: pathlib.Path):
     opener = gzip.open if path.suffix.endswith(".gz") else open
@@ -28,8 +44,12 @@ def load_corpus() -> list[dict]:
     log.error(f"No corpus file found at {CORPUS_PATHS}")
     sys.exit(1)
 
+# -------------------------------
+# Main
+# -------------------------------
+
 def main():
-    # Load config if available
+    # Load config
     chunk_size, overlap = 512, 50
     if APP_CFG.exists():
         cfg = load_yaml(APP_CFG)
@@ -40,7 +60,7 @@ def main():
 
     records = load_corpus()
     if not records:
-        log.error("Corpus is empty — nothing to index.")
+        log.error("Corpus empty — nothing to index.")
         sys.exit(1)
 
     # Chunk text
@@ -57,24 +77,40 @@ def main():
                 "text": ch
             })
 
-    log.info(f"Prepared {len(docs)} chunks from {len(records)} records")
+    total = len(docs)
+    log.info(f"Prepared {total} chunks from {len(records)} records")
 
-    # Build index
-    INDEX_DIR.mkdir(parents=True, exist_ok=True)
-    embed_and_store(docs, INDEX_DIR)
+    # Sharding loop
+    shard_id, start = 0, 0
+    while start < total:
+        end = min(start + MAX_PER_SHARD, total)
+        shard_docs = docs[start:end]
 
-    # Save metadata
-    meta = {
-        "corpus_file": str([p for p in CORPUS_PATHS if p.exists()][0]),
-        "records": len(records),
-        "chunks": len(docs),
-        "chunk_size": chunk_size,
-        "chunk_overlap": overlap,
-    }
-    with open(INDEX_DIR / "metadata.json", "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2)
+        shard_dir = INDEX_DIR / f"shard_{shard_id:02d}"
+        shard_dir.mkdir(parents=True, exist_ok=True)
 
-    log.info(f"Index built successfully at {INDEX_DIR}")
+        log.info(f"[shard {shard_id}] Building {len(shard_docs)} chunks "
+                 f"({start:,} → {end:,} / {total:,})")
+
+        t0 = time.time()
+        embed_and_store(shard_docs, shard_dir, batch_size=512, save_every=50_000)
+        dt = time.time() - t0
+
+        # ETA calc
+        done = end
+        pct = (done / total) * 100
+        shards_left = math.ceil((total - end) / MAX_PER_SHARD)
+        est_total_time = (dt / len(shard_docs)) * total
+        eta_total = est_total_time - (dt * (shard_id + 1))
+
+        log.info(f"[shard {shard_id}] Done in {dt/60:.1f} min | "
+                 f"Progress {pct:.2f}% | "
+                 f"ETA total ~{eta_total/3600:.2f}h remaining")
+
+        start = end
+        shard_id += 1
+
+    log.info(f"All shards complete. {total:,} chunks indexed into {shard_id} shards.")
 
 if __name__ == "__main__":
     main()
