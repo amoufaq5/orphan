@@ -1,23 +1,23 @@
 """
 text_trainer.py
 ---------------
-Train a GPT-style language model from scratch on a custom corpus.
+Train a GPT-style language model from scratch on your custom corpus.
 
-- Uses tokenizer at out/tokenizer/
-- Uses model config at conf/model_config.yaml
-- Trains on data/corpus/corpus.jsonl.gz
+- Tokenizer: out/tokenizer/ (trained via train_tokenizer.py)
+- Model config: conf/model_config.yaml
+- Data: data/corpus/corpus.jsonl.gz
 - Tracks perplexity on eval split
 - Saves checkpoints + final model
 """
 
-import os, json, gzip, math, pathlib
-from typing import Dict, Any, List
+import pathlib, math
+from typing import Dict, Any
 from datasets import load_dataset
 from transformers import (
     GPT2LMHeadModel, GPT2Config,
+    GPT2TokenizerFast,
     Trainer, TrainingArguments,
-    DataCollatorForLanguageModeling,
-    PreTrainedTokenizerFast
+    DataCollatorForLanguageModeling
 )
 
 from src.utils.logger import get_logger
@@ -25,18 +25,31 @@ from src.utils.config import load_yaml
 
 log = get_logger("text_trainer")
 
+
 class TextTrainer:
     def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg
 
+        # ---------------------------
         # Load tokenizer
+        # ---------------------------
         tok_path = pathlib.Path(cfg["tokenizer_path"])
         if not tok_path.exists():
             raise FileNotFoundError(f"Tokenizer not found at {tok_path}")
-        self.tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tok_path))
+
+        self.tokenizer = GPT2TokenizerFast.from_pretrained(
+            str(tok_path),
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="<unk>",
+            pad_token="<pad>",
+            mask_token="<mask>",
+        )
         log.info(f"Loaded tokenizer from {tok_path}")
 
+        # ---------------------------
         # Load model config
+        # ---------------------------
         mc_path = pathlib.Path(cfg.get("model_config", "conf/model_config.yaml"))
         if not mc_path.exists():
             raise FileNotFoundError(f"Model config not found at {mc_path}")
@@ -45,21 +58,18 @@ class TextTrainer:
 
         model_config = GPT2Config(**mc)
         self.model = GPT2LMHeadModel(model_config)
-        log.info("Initialized model from scratch")
+        log.info("Initialized model from scratch (no pretrained weights)")
 
+        # ---------------------------
         # Load dataset
+        # ---------------------------
         train_path = pathlib.Path(cfg["train_path"])
         if not train_path.exists():
             raise FileNotFoundError(f"Train path not found: {train_path}")
-        self.dataset = load_dataset(
-            "json",
-            data_files=str(train_path),
-            split="train"
-        )
 
-        # Train/test split
+        dataset = load_dataset("json", data_files=str(train_path), split="train")
         eval_split = float(cfg.get("eval_split", 0.01))
-        ds = self.dataset.train_test_split(test_size=eval_split, seed=cfg.get("seed", 42))
+        ds = dataset.train_test_split(test_size=eval_split, seed=cfg.get("seed", 42))
         self.train_ds, self.eval_ds = ds["train"], ds["test"]
 
         # Tokenize
@@ -70,15 +80,21 @@ class TextTrainer:
                 truncation=True,
                 padding="max_length"
             )
+
         self.train_ds = self.train_ds.map(tok_fn, batched=True, remove_columns=["text"])
         self.eval_ds = self.eval_ds.map(tok_fn, batched=True, remove_columns=["text"])
 
+        # ---------------------------
+        # Collator
+        # ---------------------------
         self.data_collator = DataCollatorForLanguageModeling(
             tokenizer=self.tokenizer,
             mlm=False
         )
 
+        # ---------------------------
         # Training args
+        # ---------------------------
         self.training_args = TrainingArguments(
             output_dir=cfg["out_dir"],
             overwrite_output_dir=True,
@@ -108,11 +124,19 @@ class TextTrainer:
             compute_metrics=self.compute_metrics
         )
 
+    # ---------------------------
+    # Metrics (perplexity)
+    # ---------------------------
     def compute_metrics(self, eval_pred):
-        loss = eval_pred.metrics["eval_loss"]
-        perplexity = math.exp(loss) if loss < 100 else float("inf")
-        return {"perplexity": perplexity}
+        metrics = {}
+        if "eval_loss" in eval_pred.metrics:
+            loss = eval_pred.metrics["eval_loss"]
+            metrics["perplexity"] = math.exp(loss) if loss < 100 else float("inf")
+        return metrics
 
+    # ---------------------------
+    # Training entrypoint
+    # ---------------------------
     def train(self):
         log.info("Starting training…")
         self.trainer.train()
