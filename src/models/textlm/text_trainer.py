@@ -1,187 +1,122 @@
-# src/models/textlm/text_trainer.py
-# -*- coding: utf-8 -*-
-from __future__ import annotations
+"""
+text_trainer.py
+---------------
+Train a GPT-style language model from scratch on a custom corpus.
 
-import os
-import math
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+- Uses tokenizer at out/tokenizer/
+- Uses model config at conf/model_config.yaml
+- Trains on data/corpus/corpus.jsonl.gz
+- Tracks perplexity on eval split
+- Saves checkpoints + final model
+"""
 
-import torch
-from torch.utils.data import Dataset
+import os, json, gzip, math, pathlib
+from typing import Dict, Any, List
+from datasets import load_dataset
 from transformers import (
-    AutoTokenizer, AutoModelForCausalLM,
-    Trainer, TrainingArguments, DataCollatorForLanguageModeling,
+    GPT2LMHeadModel, GPT2Config,
+    Trainer, TrainingArguments,
+    DataCollatorForLanguageModeling,
+    PreTrainedTokenizerFast
 )
 
-# Optional logger; fall back to print if your util isn't present
-try:
-    from src.utils.logger import get_logger
-    log = get_logger("text_trainer")
-except Exception:
-    import logging
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-    log = logging.getLogger("text_trainer")
+from src.utils.logger import get_logger
+from src.utils.config import load_yaml
 
-
-@dataclass
-class TextTrainerConfig:
-    model_name: str
-    train_path: str
-    eval_path: Optional[str] = None
-    output_dir: str = "out/text_model"
-    block_size: int = 512
-    epochs: int = 1
-    train_batch_size: int = 2
-    eval_batch_size: int = 2
-    lr: float = 5e-5
-    weight_decay: float = 0.0
-    warmup_ratio: float = 0.0
-    gradient_accumulation_steps: int = 1
-    logging_steps: int = 50
-    save_steps: int = 500
-    eval_steps: int = 500
-    seed: int = 42
-    fp16: bool = False
-    bf16: bool = False
-
-
-class JsonlLMDataset(Dataset):
-    """
-    Expects a JSONL with a 'text' field per line. Tokenizes into fixed-length blocks.
-    """
-    def __init__(self, path: str, tokenizer, block_size: int):
-        import json, gzip
-        self.examples: List[Dict] = []
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Dataset not found: {path}")
-        open_fn = gzip.open if path.endswith(".gz") else open
-        texts: List[str] = []
-        with open_fn(path, "rt", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    continue
-                t = obj.get("text") or obj.get("abstract") or obj.get("content") or ""
-                if t and isinstance(t, str):
-                    texts.append(t)
-
-        if not texts:
-            raise ValueError(f"No 'text' found in {path}")
-
-        joined = "\n\n".join(texts)
-        toks = tokenizer(
-            joined,
-            return_tensors="pt",
-            truncation=False,
-            add_special_tokens=False,
-        )["input_ids"][0]
-
-        # chunk into block_size
-        self.examples = [
-            {"input_ids": toks[i:i+block_size]}
-            for i in range(0, toks.size(0) - block_size + 1, block_size)
-        ]
-        log.info("Built dataset %s → %d blocks of size %d", os.path.basename(path), len(self.examples), block_size)
-
-    def __len__(self):
-        return len(self.examples)
-
-    def __getitem__(self, idx):
-        ids = self.examples[idx]["input_ids"]
-        return {"input_ids": ids, "labels": ids.clone()}
-
+log = get_logger("text_trainer")
 
 class TextTrainer:
-    def __init__(self, cfg_dict: Dict):
-        # map dict → dataclass with defaults
-        cfg = TextTrainerConfig(
-            model_name=cfg_dict.get("model_name", "gpt2"),
-            train_path=cfg_dict["train_path"],
-            eval_path=cfg_dict.get("eval_path"),
-            output_dir=cfg_dict.get("output_dir", "out/text_model"),
-            block_size=int(cfg_dict.get("block_size", 512)),
-            epochs=int(cfg_dict.get("epochs", 1)),
-            train_batch_size=int(cfg_dict.get("train_batch_size", 2)),
-            eval_batch_size=int(cfg_dict.get("eval_batch_size", 2)),
-            lr=float(cfg_dict.get("lr", 5e-5)),
-            weight_decay=float(cfg_dict.get("weight_decay", 0.0)),
-            warmup_ratio=float(cfg_dict.get("warmup_ratio", 0.0)),
-            gradient_accumulation_steps=int(cfg_dict.get("gradient_accumulation_steps", 1)),
-            logging_steps=int(cfg_dict.get("logging_steps", 50)),
-            save_steps=int(cfg_dict.get("save_steps", 500)),
-            eval_steps=int(cfg_dict.get("eval_steps", 500)),
-            seed=int(cfg_dict.get("seed", 42)),
-            fp16=bool(cfg_dict.get("fp16", False)),
-            bf16=bool(cfg_dict.get("bf16", False)),
-        )
+    def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg
 
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        log.info("Loading tokenizer/model: %s (device=%s)", cfg.model_name, self.device)
+        # Load tokenizer
+        tok_path = pathlib.Path(cfg["tokenizer_path"])
+        if not tok_path.exists():
+            raise FileNotFoundError(f"Tokenizer not found at {tok_path}")
+        self.tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tok_path))
+        log.info(f"Loaded tokenizer from {tok_path}")
 
-        self.tokenizer = AutoTokenizer.from_pretrained(cfg.model_name, use_fast=True)
-        if self.tokenizer.pad_token is None:
-            # GPT2-like models need an explicit pad token
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        # Load model config
+        mc_path = pathlib.Path(cfg.get("model_config", "conf/model_config.yaml"))
+        if not mc_path.exists():
+            raise FileNotFoundError(f"Model config not found at {mc_path}")
+        mc = load_yaml(str(mc_path))
+        log.info(f"Loaded model config from {mc_path}")
 
-        self.model = AutoModelForCausalLM.from_pretrained(cfg.model_name)
-        self.model.to(self.device)
+        model_config = GPT2Config(**mc)
+        self.model = GPT2LMHeadModel(model_config)
+        log.info("Initialized model from scratch")
 
-        self.collator = DataCollatorForLanguageModeling(
-            tokenizer=self.tokenizer, mlm=False
+        # Load dataset
+        train_path = pathlib.Path(cfg["train_path"])
+        if not train_path.exists():
+            raise FileNotFoundError(f"Train path not found: {train_path}")
+        self.dataset = load_dataset(
+            "json",
+            data_files=str(train_path),
+            split="train"
         )
 
-        os.makedirs(cfg.output_dir, exist_ok=True)
+        # Train/test split
+        eval_split = float(cfg.get("eval_split", 0.01))
+        ds = self.dataset.train_test_split(test_size=eval_split, seed=cfg.get("seed", 42))
+        self.train_ds, self.eval_ds = ds["train"], ds["test"]
 
-        self.train_ds = JsonlLMDataset(cfg.train_path, self.tokenizer, cfg.block_size)
-        self.eval_ds = JsonlLMDataset(cfg.eval_path, self.tokenizer, cfg.block_size) if cfg.eval_path else None
+        # Tokenize
+        def tok_fn(batch):
+            return self.tokenizer(
+                batch["text"],
+                max_length=cfg.get("max_length", 512),
+                truncation=True,
+                padding="max_length"
+            )
+        self.train_ds = self.train_ds.map(tok_fn, batched=True, remove_columns=["text"])
+        self.eval_ds = self.eval_ds.map(tok_fn, batched=True, remove_columns=["text"])
 
-        self.args = TrainingArguments(
-            output_dir=cfg.output_dir,
-            num_train_epochs=cfg.epochs,
-            per_device_train_batch_size=cfg.train_batch_size,
-            per_device_eval_batch_size=cfg.eval_batch_size,
-            learning_rate=cfg.lr,
-            weight_decay=cfg.weight_decay,
-            warmup_ratio=cfg.warmup_ratio,
-            evaluation_strategy="steps" if self.eval_ds is not None else "no",
-            eval_steps=cfg.eval_steps if self.eval_ds is not None else None,
-            logging_steps=cfg.logging_steps,
-            save_steps=cfg.save_steps,
-            gradient_accumulation_steps=cfg.gradient_accumulation_steps,
-            seed=cfg.seed,
-            fp16=cfg.fp16,
-            bf16=cfg.bf16,
-            report_to="none",
+        self.data_collator = DataCollatorForLanguageModeling(
+            tokenizer=self.tokenizer,
+            mlm=False
+        )
+
+        # Training args
+        self.training_args = TrainingArguments(
+            output_dir=cfg["out_dir"],
+            overwrite_output_dir=True,
+            num_train_epochs=cfg.get("epochs", 3),
+            per_device_train_batch_size=cfg.get("train_batch_size", 8),
+            gradient_accumulation_steps=cfg.get("grad_accum", 1),
+            per_device_eval_batch_size=cfg.get("train_batch_size", 8),
+            evaluation_strategy="steps",
+            eval_steps=cfg.get("logging_steps", 100),
+            save_steps=cfg.get("save_steps", 500),
+            logging_steps=cfg.get("logging_steps", 100),
+            learning_rate=cfg.get("lr", 5e-5),
+            weight_decay=cfg.get("weight_decay", 0.01),
+            warmup_ratio=cfg.get("warmup_ratio", 0.05),
+            seed=cfg.get("seed", 42),
+            save_total_limit=3,
+            report_to="none"
         )
 
         self.trainer = Trainer(
             model=self.model,
-            args=self.args,
+            args=self.training_args,
             train_dataset=self.train_ds,
             eval_dataset=self.eval_ds,
-            data_collator=self.collator,
+            data_collator=self.data_collator,
             tokenizer=self.tokenizer,
+            compute_metrics=self.compute_metrics
         )
 
-    def load_checkpoint(self, ckpt_dir_or_file: str):
-        # Transformers Trainer automatically resumes from --resume_from_checkpoint,
-        # but we expose a method for parity with your earlier code.
-        pass
+    def compute_metrics(self, eval_pred):
+        loss = eval_pred.metrics["eval_loss"]
+        perplexity = math.exp(loss) if loss < 100 else float("inf")
+        return {"perplexity": perplexity}
 
     def train(self):
-        log.info("Starting training for %d epoch(s)…", self.cfg.epochs)
-        result = self.trainer.train()
-        log.info("Training done. %s", str(result))
-
-        # final eval (optional)
-        if self.eval_ds is not None:
-            metrics = self.trainer.evaluate()
-            ppl = math.exp(metrics["eval_loss"]) if "eval_loss" in metrics else float("nan")
-            log.info("Eval: %s | ppl=%.2f", metrics, ppl)
-
-        self.trainer.save_model(self.cfg.output_dir)
-        self.tokenizer.save_pretrained(self.cfg.output_dir)
-        log.info("Saved model+tokenizer → %s", self.cfg.output_dir)
+        log.info("Starting training…")
+        self.trainer.train()
+        log.info("Saving final model…")
+        self.trainer.save_model(self.cfg["out_dir"])
+        self.tokenizer.save_pretrained(self.cfg["out_dir"])
+        log.info(f"Model + tokenizer saved to {self.cfg['out_dir']}")
