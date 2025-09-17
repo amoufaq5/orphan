@@ -1,107 +1,284 @@
-# src/rag/query_faiss.py
+# -*- coding: utf-8 -*-
+"""
+Quick retrieval check over FAISS shards (with safe tie-breaking heap).
+
+Usage:
+  python -m src.rag.query_faiss -q "adult with sore throat 2 days, no fever"
+  # optional:
+  #   --top_k 10
+  #   --faiss_glob "data/index/faiss/*.index"
+  #   --sidecar_ext ".meta.jsonl"
+  #   --model sentence-transformers/all-MiniLM-L6-v2
+  #   --fallback_corpus data/corpus/corpus.jsonl
+
+Notes:
+- If FAISS shards aren't found (or faiss isn't installed), we fall back to scanning a small JSONL corpus.
+- The priority queue (heapq) uses a numeric tie-breaker to avoid comparing dicts.
+"""
+
 from __future__ import annotations
-import argparse, pathlib, gzip, json, heapq, textwrap
-from typing import List, Dict, Tuple
-import faiss
-from src.rag.embed_faiss import get_encoder
-from src.utils.logger import get_logger
 
-log = get_logger("query_faiss")
-DEFAULT_INDEX_ROOT = pathlib.Path("data/index/faiss")
+import argparse
+import glob
+import gzip
+import heapq
+import itertools
+import json
+import logging
+import os
+import sys
+import time
+from typing import Dict, Iterable, List, Tuple, Optional
 
-def _wrap(s: str, width: int = 96) -> str:
-    return "\n       ".join(textwrap.wrap((s or "").replace("\n", " "), width=width))
+# ---------- Logging ----------
+log = logging.getLogger("query_faiss")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
 
-def _load_docstore(path: pathlib.Path) -> List[Dict]:
-    docs: List[Dict] = []
-    with gzip.open(path, "rt", encoding="utf-8") as f:
+# ---------- Optional FAISS ----------
+try:
+    import faiss  # type: ignore
+except Exception:  # pragma: no cover
+    faiss = None  # noqa: N816
+
+
+def _load_sentence_encoder(model_name: str):
+    """
+    Lazy-import sentence-transformers and load the encoder.
+    """
+    from sentence_transformers import SentenceTransformer  # lazy import
+    log.info("[encoder] Using sentence-transformers: %s", model_name)
+    return SentenceTransformer(model_name)
+
+
+def _read_jsonl(path: str) -> List[Dict]:
+    """
+    Read JSONL or JSONL.GZ into a list of dicts.
+    """
+    if not os.path.exists(path):
+        return []
+    open_fn = gzip.open if path.endswith(".gz") else open
+    items: List[Dict] = []
+    with open_fn(path, "rt", encoding="utf-8") as f:
         for line in f:
-            if line.strip():
-                docs.append(json.loads(line))
-    return docs
-
-def _load_shard(shard_dir: pathlib.Path):
-    """Load FAISS + docstore + metadata for a shard, but don't create encoder."""
-    idx_path = shard_dir / "faiss.index"
-    ds_path  = shard_dir / "docstore.jsonl.gz"
-    meta_path = shard_dir / "metadata.json"
-    if not idx_path.exists() or not ds_path.exists() or not meta_path.exists():
-        raise FileNotFoundError(f"Incomplete shard at {shard_dir}")
-    index = faiss.read_index(str(idx_path))
-    docs  = _load_docstore(ds_path)
-    meta  = json.load(open(meta_path, "r", encoding="utf-8"))
-    return index, docs, meta
-
-def main(argv=None):
-    ap = argparse.ArgumentParser(description="Query multi-shard FAISS index and merge results")
-    ap.add_argument("-q", "--query", required=True, help="Query text")
-    ap.add_argument("-k", "--topk", type=int, default=5, help="Global Top-K to return")
-    ap.add_argument("--index_dir", default=str(DEFAULT_INDEX_ROOT), help="Root index dir containing shard_* subdirs")
-    args = ap.parse_args(argv)
-
-    root = pathlib.Path(args.index_dir)
-    shards = sorted([p for p in root.glob("shard_*") if p.is_dir()])
-    if not shards:
-        # try single-index layout as a fallback
-        try:
-            idx, docs, meta = _load_shard(root)
-            shards = [root]
-            log.info("No shard_* dirs found; using single-index layout.")
-        except Exception:
-            raise SystemExit(f"No shards found in {root}. Did you run run_build_index with sharding?")
-
-    # Boot encoder from first shard's metadata
-    _, _, first_meta = _load_shard(shards[0])
-    encoder_name = first_meta.get("encoder_model")
-    encode, dim, _ = get_encoder(encoder_name)
-    log.info(f"Using encoder: {encoder_name} | shards={len(shards)}")
-
-    # Encode query once
-    qv = encode([args.query])  # [1, D]
-
-    # Global top-K heap (min-heap)
-    K = max(1, args.topk)
-    heap: List[Tuple[float, Dict]] = []  # (score, doc)
-
-    total_vectors = 0
-    for sid, sd in enumerate(shards):
-        index, docs, meta = _load_shard(sd)
-        total_vectors += int(meta.get("count", len(docs)))
-
-        # Search this shard
-        sims, ids = index.search(qv, K)
-        sims = sims[0].tolist()
-        ids  = ids[0].tolist()
-
-        for score, idx_id in zip(sims, ids):
-            if idx_id < 0 or idx_id >= len(docs):
+            line = line.strip()
+            if not line:
                 continue
-            item = docs[idx_id].copy()
-            item["_shard"] = sd.name
-            item["_score"] = float(score)
+            try:
+                items.append(json.loads(line))
+            except Exception:
+                # best-effort
+                continue
+    return items
 
-            if len(heap) < K:
-                heapq.heappush(heap, (item["_score"], item))
-            else:
-                # keep highest K scores
-                if item["_score"] > heap[0][0]:
-                    heapq.heapreplace(heap, (item["_score"], item))
 
-    # Extract sorted Top-K (highest score first)
-    results = [heapq.heappop(heap)[1] for _ in range(len(heap))]
-    results.reverse()
+def _pair_index_and_sidecar(index_path: str, sidecar_ext: str) -> Optional[str]:
+    """
+    Given an index path like /foo/bar/shard_000.index, try to find a sidecar JSONL
+    with the same stem plus sidecar_ext (default .meta.jsonl).
+    """
+    base, _ = os.path.splitext(index_path)
+    candidate = base + sidecar_ext
+    if os.path.exists(candidate):
+        return candidate
+    # Try plain .jsonl
+    candidate2 = base + ".jsonl"
+    if os.path.exists(candidate2):
+        return candidate2
+    return None
 
-    # Print
-    print(f"\nTop-{len(results)} results for: {args.query}\n"
-          f"(encoder={encoder_name} | shards={len(shards)} | vectors≈{total_vectors:,})\n")
-    for rank, d in enumerate(results, 1):
-        title  = d.get("title") or "(no title)"
-        source = d.get("source") or "(source?)"
-        shard  = d.get("_shard")
-        score  = d.get("_score", 0.0)
-        snippet = (d.get("text") or "")[:600]
-        print(f"[{rank}] score={score:.3f} | {title} | {source} | {shard}")
-        print(f"     {_wrap(snippet)}\n")
+
+def _search_faiss_shard(
+    index_path: str,
+    meta_path: Optional[str],
+    qvec,  # numpy array shape (1, d)
+    top_k: int,
+) -> List[Dict]:
+    """
+    Search a single FAISS shard. Returns list of dicts with _score and metadata.
+    """
+    res: List[Dict] = []
+    if faiss is None:
+        return res
+    try:
+        index = faiss.read_index(index_path)
+    except Exception as e:
+        log.warning("[faiss] Failed reading index %s: %s", index_path, e)
+        return res
+
+    # Optional sidecar rows for mapping IDs → docs
+    rows: List[Dict] = _read_jsonl(meta_path) if meta_path else []
+
+    try:
+        D, I = index.search(qvec, top_k)
+    except Exception as e:
+        log.warning("[faiss] Search failed on %s: %s", index_path, e)
+        return res
+
+    # Map results to items
+    for score, idx in zip(D[0], I[0]):
+        if idx < 0:
+            continue
+        item: Dict = {}
+        if 0 <= idx < len(rows):
+            item = dict(rows[idx])
+        # Attach score and index bookkeeping
+        item["_score"] = float(score)
+        item["_shard"] = os.path.basename(index_path)
+        item["_id"] = idx
+        res.append(item)
+
+    return res
+
+
+def _cosine_similarity(a, b) -> float:
+    import numpy as np
+    denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12
+    return float(np.dot(a, b) / denom)
+
+
+def _fallback_bruteforce(
+    query: str,
+    encoder,
+    corpus_path: str,
+    top_k: int,
+) -> List[Dict]:
+    """
+    If no FAISS is available, do a tiny brute-force search over JSONL corpus.
+    Intended only for quick sanity checks (small files).
+    """
+    rows = _read_jsonl(corpus_path)
+    if not rows:
+        log.warning("[fallback] No corpus at %s", corpus_path)
+        return []
+
+    import numpy as np
+
+    qvec = encoder.encode([query], convert_to_numpy=True)[0]
+    heap: List[Tuple[float, int, Dict]] = []
+    tie = itertools.count()
+
+    # Optionally pre-encode docs if text field exists
+    # We'll build text from common fields
+    def text_of(r: Dict) -> str:
+        for key in ("text", "abstract", "content", "passage", "body"):
+            if key in r and isinstance(r[key], str) and r[key].strip():
+                return r[key]
+        # Fallback: join some fields
+        title = r.get("title", "")
+        desc = r.get("description", "")
+        return f"{title}\n{desc}"
+
+    # Encode in small batches to avoid memory spikes
+    B = 64
+    for i in range(0, len(rows), B):
+        batch = rows[i : i + B]
+        texts = [text_of(r) for r in batch]
+        vecs = encoder.encode(texts, convert_to_numpy=True, batch_size=32, show_progress_bar=False)
+        for r, v in zip(batch, vecs):
+            score = _cosine_similarity(qvec, v)
+            heapq.heappush(heap, (-score, next(tie), {**r, "_score": float(score), "_shard": "fallback"}))
+
+    out: List[Dict] = []
+    for _ in range(min(top_k, len(heap))):
+        _, _, itm = heapq.heappop(heap)
+        out.append(itm)
+    return out
+
+
+def main():
+    p = argparse.ArgumentParser(description="FAISS shard query with tie-safe heap.")
+    p.add_argument("-q", "--query", required=True, help="Natural-language query text")
+    p.add_argument("--top_k", type=int, default=10, help="How many results to return")
+    p.add_argument(
+        "--model",
+        default="sentence-transformers/all-MiniLM-L6-v2",
+        help="Sentence-Transformers model name",
+    )
+    p.add_argument(
+        "--faiss_glob",
+        default="data/index/faiss/*.index",
+        help="Glob pattern for FAISS shard indexes",
+    )
+    p.add_argument(
+        "--sidecar_ext",
+        default=".meta.jsonl",
+        help="Sidecar extension paired with each index (fallback to .jsonl if missing)",
+    )
+    p.add_argument(
+        "--fallback_corpus",
+        default="data/corpus/corpus.jsonl",
+        help="Used if FAISS shards not found or faiss missing",
+    )
+    args = p.parse_args()
+
+    t0 = time.time()
+    encoder = _load_sentence_encoder(args.model)
+    qvec = encoder.encode([args.query], convert_to_numpy=True)
+
+    # Discover shards
+    shard_paths = sorted(glob.glob(args.faiss_glob))
+    if shard_paths and faiss is not None:
+        log.info("Using encoder: %s | shards=%d", args.model, len(shard_paths))
+    else:
+        if not shard_paths:
+            log.warning("[faiss] No shards matched: %s", args.faiss_glob)
+        if faiss is None:
+            log.warning("[faiss] faiss module not available; using fallback.")
+        results = _fallback_bruteforce(args.query, encoder, args.fallback_corpus, args.top_k)
+        _print_results(results, t0)
+        return
+
+    # -------- Search all shards with tie-safe heap --------
+    heap: List[Tuple[float, int, Dict]] = []
+    tie = itertools.count()
+    total_hits = 0
+
+    for idx_path in shard_paths:
+        meta_path = _pair_index_and_sidecar(idx_path, args.sidecar_ext)
+        shard_res = _search_faiss_shard(idx_path, meta_path, qvec, args.top_k)
+        total_hits += len(shard_res)
+        for item in shard_res:
+            # SAFE: use (-score, counter, item) so heap never compares dicts
+            heapq.heappush(heap, (-item["_score"], next(tie), item))
+
+    # Drain heap → top_k
+    out: List[Dict] = []
+    k = min(args.top_k, len(heap))
+    for _ in range(k):
+        _, _, itm = heapq.heappop(heap)
+        out.append(itm)
+
+    _print_results(out, t0, extra=f"shards={len(shard_paths)} hits={total_hits}")
+
+
+def _print_results(results: List[Dict], t0: float, extra: str = ""):
+    dt = time.time() - t0
+    if extra:
+        log.info("Done in %.3fs | %s", dt, extra)
+    else:
+        log.info("Done in %.3fs", dt)
+
+    # Pretty print
+    for i, r in enumerate(results, 1):
+        title = r.get("title") or r.get("id") or r.get("uid") or ""
+        snippet = (
+            r.get("text")
+            or r.get("abstract")
+            or r.get("description")
+            or ""
+        )
+        # keep snippets short
+        snippet = (snippet[:160] + "…") if len(snippet) > 160 else snippet
+        score = r.get("_score", 0.0)
+        shard = r.get("_shard", "")
+        print(f"{i:>2}. {score:7.4f}  [{shard}]  {title}\n    {snippet}\n")
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
