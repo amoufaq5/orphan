@@ -1,55 +1,30 @@
-train:
-  tokenizer:
-    vocab_size: 52000
-    min_freq: 2
-    model_type: spm_unigram
-    character_coverage: 0.9995
-    byte_fallback: true
-    lowercase: false
-    normalization: "NFKC"
-    special_tokens: ["<pad>", "<s>", "</s>", "<unk>", "<triage>", "<referral>", "<cite>", "<arabic>", "<english>"]
+# conf/train_text.yaml
+# Config for base TextLM training / continue-pretraining
 
-  tokenizer_corpus:
-    input_globs:
-      - "data/canonical/canonical*.jsonl"
-    include_types: ["article", "drug_label", "trial"]
-    max_docs: 100000
-    output_txt: "out/tokenizer/corpus.txt"
-    dedupe_by_hash: true
-    arabic_hint_token: "<arabic>"
-    english_hint_token: "<english>"
+# Path to unified training corpus (built via make_corpus.py)
+train_path: "data/corpus/corpus.jsonl.gz"
 
-  textlm:
-    model_dim: 768
-    n_layers: 16
-    n_heads: 12
-    ffn_mult: 4
-    norm: "rms"
-    rope: true
-    context_len: 8192
-    dropout: 0.1
+# Output directory for checkpoints
+out_dir: "out/models/textlm"
 
-  optimization:
-    batch_size: 16
-    grad_accum: 2
-    lr: 3.0e-4
-    weight_decay: 0.05
-    warmup_ratio: 0.06
-    epochs: 3
+# Tokenizer to use (must exist or be trained already)
+tokenizer_path: "out/tokenizer"
 
+# Training parameters
+epochs: 3
+train_batch_size: 16
+grad_accum: 2
+max_length: 512
+lr: 5e-5
+weight_decay: 0.01
+warmup_ratio: 0.05
 
-  io:                                  # <<=== this is missing in your file
-    out_dir: "out/text_orphgpt"
-    save_every_steps: 1000
-    eval_every_steps: 1000
-    log_every_steps: 100
-    keep_last_n: 3
+# Evaluation split (0.01 = 1%)
+eval_split: 0.01
 
-  data:
-    train_glob: "data/canonical/canonical*.jsonl"
-    eval_ratio: 0.01
-    min_seq_len: 16
-    max_seq_len: 8192
-    text_fields: ["sections.body"]
-    shuffle_buffer: 20000
-    pack_sequences: true
+# Logging / saving
+logging_steps: 100
+save_steps: 500
+
+# Random seed for reproducibility
+seed: 42
