@@ -4,7 +4,7 @@ Train a text language model (OrphGPT text branch).
 
 Usage:
     python -m src.models.textlm.train_text -c conf/train_text.yaml
-    # or equivalently:
+    # or:
     python -m src.models.textlm.train_text --config conf/train_text.yaml
 """
 
@@ -15,26 +15,22 @@ import sys
 import yaml
 import torch
 
-from src.utils.logger import get_logger
-from src.training.text_trainer import TextTrainer
+# --- bootstrap sys.path so "src" is importable even if run oddly ---
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+# -------------------------------------------------------------------
 
+from src.utils.logger import get_logger
+from src.models.textlm.text_trainer import TextTrainer   # <-- FIXED PATH
 
 log = get_logger("train_text")
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train Orph text language model")
-    p.add_argument(
-        "-c",
-        "--config",
-        required=True,
-        help="Path to YAML config file",
-    )
-    p.add_argument(
-        "--resume",
-        default=None,
-        help="Optional checkpoint path to resume from",
-    )
+    p.add_argument("-c", "--config", required=True, help="Path to YAML config file")
+    p.add_argument("--resume", default=None, help="Optional checkpoint path to resume from")
     return p.parse_args()
 
 
