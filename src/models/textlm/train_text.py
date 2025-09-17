@@ -1,12 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Train a text language model (OrphGPT text branch).
-
-Usage:
-    python -m src.models.textlm.train_text -c conf/train_text.yaml
-    # or:
-    python -m src.models.textlm.train_text --config conf/train_text.yaml
-"""
 
 import argparse
 import logging
