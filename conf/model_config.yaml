@@ -1,0 +1,13 @@
+# conf/model_config.yaml
+# Architecture config for scratch-built GPT-style model (~140M params)
+
+vocab_size: 32000       # must match your tokenizer
+n_positions: 512
+n_ctx: 512
+n_embd: 768
+n_layer: 12
+n_head: 12
+
+bos_token_id: 0
+eos_token_id: 2
+pad_token_id: 1
