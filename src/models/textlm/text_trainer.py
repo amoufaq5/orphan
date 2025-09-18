@@ -5,11 +5,12 @@ Train a GPT-style language model from scratch on your custom corpus.
 
 - Tokenizer: out/tokenizer/ (trained via train_tokenizer.py)
 - Model config: conf/model_config.yaml
-- Data: data/corpus/corpus.jsonl.gz
+- Data: data/corpus/corpus.jsonl(.gz)
 - Tracks perplexity when eval_loss is available
 - Saves checkpoints + final model
 - Resumes automatically from last checkpoint if available
 - Type coercion on YAML numbers to avoid str/float errors
+- Drops ALL non-tensor columns before collation (fixes "too many dimensions 'str'")
 """
 
 import pathlib, math, inspect
@@ -86,7 +87,7 @@ def _build_training_args(cfg: Dict[str, Any]) -> TrainingArguments:
         if has("do_eval"): kw["do_eval"] = True
         if has("eval_steps"): kw["eval_steps"] = _as_int(cfg.get("logging_steps", 100), 100)
 
-    return TrainingArguments(**kw)
+    return TrainingArguments(**(kw))
 
 
 # ---------------------------
@@ -109,6 +110,9 @@ class TextTrainer:
             pad_token="<pad>",
             mask_token="<mask>",
         )
+        # Ensure pad token is set (some GPT tokenizers may not have one)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
         log.info(f"Loaded tokenizer from {tok_path}")
 
         # --- Model config ---
@@ -138,17 +142,25 @@ class TextTrainer:
         if cfg.get("max_eval_samples"):
             self.eval_ds = self.eval_ds.select(range(_as_int(cfg["max_eval_samples"])))
 
-        # Tokenize
+        # --- Tokenize & DROP ALL original columns ---
+        train_remove_cols = list(self.train_ds.column_names)
+        eval_remove_cols  = list(self.eval_ds.column_names)
+
         def tok_fn(batch):
             return self.tokenizer(
                 batch["text"],
-                max_length=_as_int(cfg.get("max_length", 512), 512),
+                max_length=_as_int(self.cfg.get("max_length", 512), 512),
                 truncation=True,
                 padding="max_length",
+                return_attention_mask=True,
             )
 
-        self.train_ds = self.train_ds.map(tok_fn, batched=True, remove_columns=["text"])
-        self.eval_ds = self.eval_ds.map(tok_fn, batched=True, remove_columns=["text"])
+        self.train_ds = self.train_ds.map(
+            tok_fn, batched=True, remove_columns=train_remove_cols
+        )
+        self.eval_ds = self.eval_ds.map(
+            tok_fn, batched=True, remove_columns=eval_remove_cols
+        )
 
         # --- Collator ---
         self.data_collator = DataCollatorForLanguageModeling(
@@ -156,7 +168,7 @@ class TextTrainer:
             mlm=False,
         )
 
-        # --- Training args (safe) ---
+        # --- Training args (version-safe) ---
         self.training_args = _build_training_args(cfg)
 
         # --- Trainer ---
@@ -166,7 +178,7 @@ class TextTrainer:
             train_dataset=self.train_ds,
             eval_dataset=self.eval_ds,
             data_collator=self.data_collator,
-            tokenizer=self.tokenizer,
+            tokenizer=self.tokenizer,  # keep for older versions; newer raise FutureWarning only
             compute_metrics=self.compute_metrics,
         )
 
