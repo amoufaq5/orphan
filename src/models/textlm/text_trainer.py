@@ -9,7 +9,7 @@ Train a GPT-style language model from scratch on your custom corpus.
 - Tracks perplexity when eval_loss is available
 - Saves checkpoints + final model
 - Resumes automatically from last checkpoint if available
-- Compatible with older/newer 🤗 Transformers by probing TrainingArguments signature
+- Type coercion on YAML numbers to avoid str/float errors
 """
 
 import pathlib, math, inspect
@@ -29,51 +29,74 @@ from src.utils.config import load_yaml
 log = get_logger("text_trainer")
 
 
+# ---------------------------
+# Helpers for safe type coercion
+# ---------------------------
+def _as_float(v, default=None):
+    try:
+        return float(v)
+    except Exception:
+        return float(default) if default is not None else None
+
+def _as_int(v, default=None):
+    try:
+        return int(v)
+    except Exception:
+        return int(default) if default is not None else None
+
+
+# ---------------------------
+# TrainingArguments builder (version-safe)
+# ---------------------------
 def _build_training_args(cfg: Dict[str, Any]) -> TrainingArguments:
-    """Build TrainingArguments with only kwargs supported by the installed transformers."""
     sig = inspect.signature(TrainingArguments.__init__).parameters
     def has(p: str) -> bool: return p in sig
 
     kw = dict(output_dir=cfg["out_dir"], overwrite_output_dir=True)
 
     # Core knobs
-    if has("num_train_epochs"): kw["num_train_epochs"] = cfg.get("epochs", 3)
-    if has("per_device_train_batch_size"): kw["per_device_train_batch_size"] = cfg.get("train_batch_size", 8)
-    if has("gradient_accumulation_steps"): kw["gradient_accumulation_steps"] = cfg.get("grad_accum", 1)
-    if has("per_device_eval_batch_size"): kw["per_device_eval_batch_size"] = cfg.get("train_batch_size", 8)
-    if has("learning_rate"): kw["learning_rate"] = cfg.get("lr", 5e-5)
-    if has("weight_decay"): kw["weight_decay"] = cfg.get("weight_decay", 0.01)
-    if has("warmup_ratio"): kw["warmup_ratio"] = cfg.get("warmup_ratio", 0.05)
-    if has("seed"): kw["seed"] = cfg.get("seed", 42)
+    if has("num_train_epochs"): kw["num_train_epochs"] = _as_float(cfg.get("epochs", 3), 3)
+    if has("per_device_train_batch_size"): kw["per_device_train_batch_size"] = _as_int(cfg.get("train_batch_size", 8), 8)
+    if has("gradient_accumulation_steps"): kw["gradient_accumulation_steps"] = _as_int(cfg.get("grad_accum", 1), 1)
+    if has("per_device_eval_batch_size"): kw["per_device_eval_batch_size"] = _as_int(cfg.get("train_batch_size", 8), 8)
+
+    # Optimizer
+    if has("learning_rate"): kw["learning_rate"] = _as_float(cfg.get("lr", 5e-5), 5e-5)
+    if has("weight_decay"): kw["weight_decay"] = _as_float(cfg.get("weight_decay", 0.01), 0.01)
+    if has("warmup_ratio"): kw["warmup_ratio"] = _as_float(cfg.get("warmup_ratio", 0.05), 0.05)
+
+    # Misc
+    if has("seed"): kw["seed"] = _as_int(cfg.get("seed", 42), 42)
     if has("save_total_limit"): kw["save_total_limit"] = 3
     if has("report_to"): kw["report_to"] = "none"
 
     # Logging/saving
-    if has("logging_steps"): kw["logging_steps"] = cfg.get("logging_steps", 100)
-    if has("save_steps"): kw["save_steps"] = cfg.get("save_steps", 500)
+    if has("logging_steps"): kw["logging_steps"] = _as_int(cfg.get("logging_steps", 100), 100)
+    if has("save_steps"): kw["save_steps"] = _as_int(cfg.get("save_steps", 500), 500)
 
     # Evaluation (newer versions)
     if has("evaluation_strategy"):
         kw["evaluation_strategy"] = "steps"
-        if has("eval_steps"): kw["eval_steps"] = cfg.get("logging_steps", 100)
+        if has("eval_steps"): kw["eval_steps"] = _as_int(cfg.get("logging_steps", 100), 100)
         if has("load_best_model_at_end"): kw["load_best_model_at_end"] = False
         if has("metric_for_best_model"): kw["metric_for_best_model"] = "loss"
         if has("greater_is_better"): kw["greater_is_better"] = False
     else:
         # Older versions: enable eval if supported
         if has("do_eval"): kw["do_eval"] = True
-        if has("eval_steps"): kw["eval_steps"] = cfg.get("logging_steps", 100)
+        if has("eval_steps"): kw["eval_steps"] = _as_int(cfg.get("logging_steps", 100), 100)
 
     return TrainingArguments(**kw)
 
 
+# ---------------------------
+# Trainer wrapper
+# ---------------------------
 class TextTrainer:
     def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg
 
-        # ---------------------------
-        # Load tokenizer
-        # ---------------------------
+        # --- Tokenizer ---
         tok_path = pathlib.Path(cfg["tokenizer_path"])
         if not tok_path.exists():
             raise FileNotFoundError(f"Tokenizer not found at {tok_path}")
@@ -88,9 +111,7 @@ class TextTrainer:
         )
         log.info(f"Loaded tokenizer from {tok_path}")
 
-        # ---------------------------
-        # Load model config
-        # ---------------------------
+        # --- Model config ---
         mc_path = pathlib.Path(cfg.get("model_config", "conf/model_config.yaml"))
         if not mc_path.exists():
             raise FileNotFoundError(f"Model config not found at {mc_path}")
@@ -101,29 +122,27 @@ class TextTrainer:
         self.model = GPT2LMHeadModel(model_config)
         log.info("Initialized model from scratch (no pretrained weights)")
 
-        # ---------------------------
-        # Load dataset
-        # ---------------------------
+        # --- Dataset ---
         train_path = pathlib.Path(cfg["train_path"])
         if not train_path.exists():
             raise FileNotFoundError(f"Train path not found: {train_path}")
 
         dataset = load_dataset("json", data_files=str(train_path), split="train")
-        eval_split = float(cfg.get("eval_split", 0.01))
-        ds = dataset.train_test_split(test_size=eval_split, seed=cfg.get("seed", 42))
+        eval_split = _as_float(cfg.get("eval_split", 0.01), 0.01)
+        ds = dataset.train_test_split(test_size=eval_split, seed=_as_int(cfg.get("seed", 42), 42))
         self.train_ds, self.eval_ds = ds["train"], ds["test"]
 
         # Optional downsampling for quick tests
         if cfg.get("max_train_samples"):
-            self.train_ds = self.train_ds.select(range(cfg["max_train_samples"]))
+            self.train_ds = self.train_ds.select(range(_as_int(cfg["max_train_samples"])))
         if cfg.get("max_eval_samples"):
-            self.eval_ds = self.eval_ds.select(range(cfg["max_eval_samples"]))
+            self.eval_ds = self.eval_ds.select(range(_as_int(cfg["max_eval_samples"])))
 
         # Tokenize
         def tok_fn(batch):
             return self.tokenizer(
                 batch["text"],
-                max_length=cfg.get("max_length", 512),
+                max_length=_as_int(cfg.get("max_length", 512), 512),
                 truncation=True,
                 padding="max_length",
             )
@@ -131,22 +150,16 @@ class TextTrainer:
         self.train_ds = self.train_ds.map(tok_fn, batched=True, remove_columns=["text"])
         self.eval_ds = self.eval_ds.map(tok_fn, batched=True, remove_columns=["text"])
 
-        # ---------------------------
-        # Collator
-        # ---------------------------
+        # --- Collator ---
         self.data_collator = DataCollatorForLanguageModeling(
             tokenizer=self.tokenizer,
             mlm=False,
         )
 
-        # ---------------------------
-        # Training args (version-safe)
-        # ---------------------------
+        # --- Training args (safe) ---
         self.training_args = _build_training_args(cfg)
 
-        # ---------------------------
-        # Trainer
-        # ---------------------------
+        # --- Trainer ---
         self.trainer = Trainer(
             model=self.model,
             args=self.training_args,
@@ -157,9 +170,7 @@ class TextTrainer:
             compute_metrics=self.compute_metrics,
         )
 
-        # ---------------------------
-        # Resume checkpoint if exists
-        # ---------------------------
+        # --- Resume checkpoint if exists ---
         self.last_checkpoint = None
         output_dir = pathlib.Path(self.cfg["out_dir"])
         if output_dir.exists():
@@ -168,12 +179,8 @@ class TextTrainer:
                 log.info(f"Resuming training from checkpoint: {last_ckpt}")
                 self.last_checkpoint = last_ckpt
 
-    # ---------------------------
-    # Metrics (perplexity)
-    # ---------------------------
+    # --- Metrics (perplexity) ---
     def compute_metrics(self, eval_pred):
-        # On newer Trainer versions, metrics dict includes eval_loss.
-        # On older ones, this may be empty — return {} to avoid crashes.
         try:
             metrics = {}
             if hasattr(eval_pred, "metrics") and "eval_loss" in eval_pred.metrics:
@@ -183,9 +190,7 @@ class TextTrainer:
         except Exception:
             return {}
 
-    # ---------------------------
-    # Training entrypoint
-    # ---------------------------
+    # --- Training entrypoint ---
     def train(self):
         log.info("Starting training…")
         self.trainer.train(resume_from_checkpoint=self.last_checkpoint)
