@@ -6,19 +6,20 @@ Train a GPT-style language model from scratch on your custom corpus.
 - Tokenizer: out/tokenizer/ (trained via train_tokenizer.py)
 - Model config: conf/model_config.yaml
 - Data: data/corpus/corpus.jsonl.gz
-- Tracks perplexity on eval split
+- Tracks perplexity when eval_loss is available
 - Saves checkpoints + final model
 - Resumes automatically from last checkpoint if available
+- Compatible with older/newer 🤗 Transformers by probing TrainingArguments signature
 """
 
-import pathlib, math
+import pathlib, math, inspect
 from typing import Dict, Any
 from datasets import load_dataset
 from transformers import (
     GPT2LMHeadModel, GPT2Config,
     GPT2TokenizerFast,
     Trainer, TrainingArguments,
-    DataCollatorForLanguageModeling
+    DataCollatorForLanguageModeling,
 )
 from transformers.trainer_utils import get_last_checkpoint
 
@@ -26,6 +27,44 @@ from src.utils.logger import get_logger
 from src.utils.config import load_yaml
 
 log = get_logger("text_trainer")
+
+
+def _build_training_args(cfg: Dict[str, Any]) -> TrainingArguments:
+    """Build TrainingArguments with only kwargs supported by the installed transformers."""
+    sig = inspect.signature(TrainingArguments.__init__).parameters
+    def has(p: str) -> bool: return p in sig
+
+    kw = dict(output_dir=cfg["out_dir"], overwrite_output_dir=True)
+
+    # Core knobs
+    if has("num_train_epochs"): kw["num_train_epochs"] = cfg.get("epochs", 3)
+    if has("per_device_train_batch_size"): kw["per_device_train_batch_size"] = cfg.get("train_batch_size", 8)
+    if has("gradient_accumulation_steps"): kw["gradient_accumulation_steps"] = cfg.get("grad_accum", 1)
+    if has("per_device_eval_batch_size"): kw["per_device_eval_batch_size"] = cfg.get("train_batch_size", 8)
+    if has("learning_rate"): kw["learning_rate"] = cfg.get("lr", 5e-5)
+    if has("weight_decay"): kw["weight_decay"] = cfg.get("weight_decay", 0.01)
+    if has("warmup_ratio"): kw["warmup_ratio"] = cfg.get("warmup_ratio", 0.05)
+    if has("seed"): kw["seed"] = cfg.get("seed", 42)
+    if has("save_total_limit"): kw["save_total_limit"] = 3
+    if has("report_to"): kw["report_to"] = "none"
+
+    # Logging/saving
+    if has("logging_steps"): kw["logging_steps"] = cfg.get("logging_steps", 100)
+    if has("save_steps"): kw["save_steps"] = cfg.get("save_steps", 500)
+
+    # Evaluation (newer versions)
+    if has("evaluation_strategy"):
+        kw["evaluation_strategy"] = "steps"
+        if has("eval_steps"): kw["eval_steps"] = cfg.get("logging_steps", 100)
+        if has("load_best_model_at_end"): kw["load_best_model_at_end"] = False
+        if has("metric_for_best_model"): kw["metric_for_best_model"] = "loss"
+        if has("greater_is_better"): kw["greater_is_better"] = False
+    else:
+        # Older versions: enable eval if supported
+        if has("do_eval"): kw["do_eval"] = True
+        if has("eval_steps"): kw["eval_steps"] = cfg.get("logging_steps", 100)
+
+    return TrainingArguments(**kw)
 
 
 class TextTrainer:
@@ -74,7 +113,7 @@ class TextTrainer:
         ds = dataset.train_test_split(test_size=eval_split, seed=cfg.get("seed", 42))
         self.train_ds, self.eval_ds = ds["train"], ds["test"]
 
-        # Downsample for debugging (optional in YAML)
+        # Optional downsampling for quick tests
         if cfg.get("max_train_samples"):
             self.train_ds = self.train_ds.select(range(cfg["max_train_samples"]))
         if cfg.get("max_eval_samples"):
@@ -86,7 +125,7 @@ class TextTrainer:
                 batch["text"],
                 max_length=cfg.get("max_length", 512),
                 truncation=True,
-                padding="max_length"
+                padding="max_length",
             )
 
         self.train_ds = self.train_ds.map(tok_fn, batched=True, remove_columns=["text"])
@@ -97,30 +136,13 @@ class TextTrainer:
         # ---------------------------
         self.data_collator = DataCollatorForLanguageModeling(
             tokenizer=self.tokenizer,
-            mlm=False
+            mlm=False,
         )
 
         # ---------------------------
-        # Training args
+        # Training args (version-safe)
         # ---------------------------
-        self.training_args = TrainingArguments(
-            output_dir=cfg["out_dir"],
-            overwrite_output_dir=True,
-            num_train_epochs=cfg.get("epochs", 3),
-            per_device_train_batch_size=cfg.get("train_batch_size", 8),
-            gradient_accumulation_steps=cfg.get("grad_accum", 1),
-            per_device_eval_batch_size=cfg.get("train_batch_size", 8),
-            evaluation_strategy="steps" if "evaluation_strategy" in TrainingArguments.__init__.__code__.co_varnames else "no",
-            eval_steps=cfg.get("logging_steps", 100),
-            save_steps=cfg.get("save_steps", 500),
-            logging_steps=cfg.get("logging_steps", 100),
-            learning_rate=cfg.get("lr", 5e-5),
-            weight_decay=cfg.get("weight_decay", 0.01),
-            warmup_ratio=cfg.get("warmup_ratio", 0.05),
-            seed=cfg.get("seed", 42),
-            save_total_limit=3,
-            report_to="none"
-        )
+        self.training_args = _build_training_args(cfg)
 
         # ---------------------------
         # Trainer
@@ -132,7 +154,7 @@ class TextTrainer:
             eval_dataset=self.eval_ds,
             data_collator=self.data_collator,
             tokenizer=self.tokenizer,
-            compute_metrics=self.compute_metrics
+            compute_metrics=self.compute_metrics,
         )
 
         # ---------------------------
@@ -150,11 +172,16 @@ class TextTrainer:
     # Metrics (perplexity)
     # ---------------------------
     def compute_metrics(self, eval_pred):
-        metrics = {}
-        if "eval_loss" in eval_pred.metrics:
-            loss = eval_pred.metrics["eval_loss"]
-            metrics["perplexity"] = math.exp(loss) if loss < 100 else float("inf")
-        return metrics
+        # On newer Trainer versions, metrics dict includes eval_loss.
+        # On older ones, this may be empty — return {} to avoid crashes.
+        try:
+            metrics = {}
+            if hasattr(eval_pred, "metrics") and "eval_loss" in eval_pred.metrics:
+                loss = eval_pred.metrics["eval_loss"]
+                metrics["perplexity"] = math.exp(loss) if loss < 100 else float("inf")
+            return metrics
+        except Exception:
+            return {}
 
     # ---------------------------
     # Training entrypoint
