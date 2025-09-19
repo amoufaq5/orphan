@@ -24,6 +24,18 @@ logging_steps: 100
 save_steps: 500             # save checkpoint every N steps
 seed: 42
 
-# ---- (Optional) Debug downsampling ----
-# max_train_samples: 50000
-# max_eval_samples: 2000
+# Performance (GPU)
+fp16: true        # set bf16: true & fp16: false if your stack/GPU supports bf16 well
+bf16: false
+num_workers: 4    # bump to 8 if dataloader is the bottleneck
+pin_memory: auto  # our code treats 'auto' as True on GPU, False on CPU
+grad_ckpt: true   # reduces VRAM; a bit slower but safer
+
+# Throughput
+train_batch_size: 16   # if OOM, try 8 or 4, and raise grad_accum accordingly
+grad_accum: 2          # effective batch = batch_size * grad_accum * num_gpus
+max_length: 512        # if OOM, try 384 or 256
+
+# Logging/ckpt (keep)
+logging_steps: 100
+save_steps: 1000       # fewer, larger checkpoints for long runs
