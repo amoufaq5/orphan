@@ -1,41 +1,101 @@
-sft:
-  # source → task builders
-  build:
-    input_globs:
-      - "data/canonical/canonical*.jsonl"
-    out_jsonl: "out/sft/tasks.sft.jsonl"
-    max_tasks:
-      drug_label: 20000
-      trial: 10000
-      article: 10000
-    min_section_chars: 120
-    languages: ["en", "ar"]
+# =========================
+# Orph — Supervised Fine-Tuning
+# Target: H100 PCIe (single GPU), bf16
+# =========================
 
-  templates:
-    persona: "doctor"          # "patient" | "doctor" | "pharmacist"
-    enforce_citations: true
-    otc_first: true
+project:
+  name: orph_sft
+  seed: 1337
+  notes: "SFT on medical instruction/QA. Low LR, frequent eval."
 
-  data:
-    train_path: "out/sft/tasks.sft.jsonl"
-    max_seq_len: 1024          # ↓ lowered for CPU safety (use 512 if still tight)
-    batch_size: 2              # ↓ lowered for CPU safety (use 1 if still tight)
-    grad_accum: 1
-    shuffle_buffer: 4000
+paths:
+  data_dir: /workspace/vol/data
+  out_dir:  /workspace/vol/out
+  tokenizer_dir: /workspace/vol/out/tokenizer
+  base_checkpoint: /workspace/vol/out/text_orphgpt/latest   # or a specific ckpt path
+  # If you saved a final consolidated checkpoint, point to that.
 
-  optimization:
-    lr: 2.0e-5
-    weight_decay: 0.05
-    epochs: 1
-    warmup_ratio: 0.06
-    betas: [0.9, 0.95]
-    amp: false                 # CPU run; AMP off; auto-enabled if you switch to CUDA code path later
-    max_grad_norm: 1.0
-    seed: 1337
+data:
+  # Choose one of the following depending on your dataset:
+  # 1) Chat-format (OpenAI-style)
+  #   train_glob: "${paths.data_dir}/sft/chat/train/*.jsonl.zst"
+  #   val_glob:   "${paths.data_dir}/sft/chat/val/*.jsonl.zst"
+  #   format: chat
+  # 2) Instruction-format (instruction/input/output)
+  train_glob: "${paths.data_dir}/sft/instruct/train/*.jsonl.zst"
+  val_glob:   "${paths.data_dir}/sft/instruct/val/*.jsonl.zst"
+  format: instruct
+  fields:
+    instruction_key: instruction
+    input_key: input
+    output_key: output
 
-  model:
-    spm_model: "out/tokenizer/orph_spm.model"
-    special_tokens: ["<pad>", "<s>", "</s>", "<unk>", "<triage>", "<referral>", "<cite>", "<arabic>", "<english>"]
-    ckpt_in: "out/text_orphgpt/best.pt"
-    ckpt_out_dir: "out/sft_orphgpt"
-    keep_last_n: 3
+  # tokenization
+  max_seq_len: 2048           # SFT benefits from longer context if you have it
+  pack_sequences: true        # if you have multiple short turns
+  add_bos: true
+  add_eos: true
+
+  # loader
+  shuffle_buffer: 131072
+  prefetch_factor: 8
+  num_workers: 6
+  pin_memory: true
+  drop_last: true
+  zstd_streaming: true
+
+model:
+  # Load base config or inherit automatically from checkpoint
+  config_file: conf/model_config.yaml
+  overrides:
+    tie_word_embeddings: true
+    attn_impl: flash
+
+train:
+  dtype: bfloat16
+  grad_checkpointing: true
+  torch_compile: none          # SFT step can be finicky; enable later if stable
+  micro_batch_size: 4          # start modest for PCIe; bump after testing
+  grad_accum: 8                # effective batch = 32 sequences
+  max_steps: 10000
+  log_every: 25
+  eval_every: 500
+  save_every: 1000
+  save_total_limit: 10
+  # freeze embeddings if VRAM is tight (optional):
+  # freeze:
+  #   embeddings: false
+  #   ln_f: false
+  #   lm_head: false
+
+optimizer:
+  name: adamw
+  lr: 1.5e-5                   # lower LR for SFT
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+
+scheduler:
+  name: cosine
+  warmup_ratio: 0.05
+
+io:
+  out_dir: "${paths.out_dir}/sft_orphgpt"
+  resume_from: ""              # set if resuming SFT
+
+loss:
+  label_smoothing: 0.0
+  ignore_index: -100           # ensure your collator sets this for masked tokens
+  only_on_assistant: true      # train loss only on target/assistant turns
+
+validation:
+  max_batches: 100
+  metrics:
+    - ppl
+    - loss
+
+packing:
+  # If your trainer supports dynamic chat packing/EOS insertion:
+  chat_eos_on_assistant: true
+  trim_user_prompts: false
