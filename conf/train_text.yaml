@@ -1,41 +1,27 @@
-# conf/train_text.yaml
-# Training config for your from-scratch GPT-style LM
+# Data
+train_jsonl_glob: "data/cleaned/**/*.jsonl" # or data/raw/**/part-*.jsonl after a packing step
+text_key: "text" # adjust to your schema
+block_size: 512 # tokens per example
 
-# ---- Data & Paths ----
-train_path: "data/corpus/corpus.jsonl.gz"   # unified corpus
-out_dir: "out/models/textlm"                # checkpoints + final model
-tokenizer_path: "out/tokenizer"             # your ByteLevel BPE tokenizer
-model_config: "conf/model_config.yaml"      # architecture (~140M)
+# Output
+output_dir: "out/text_orphgpt"
+logging_steps: 20
+save_steps: 2000
+eval_steps: 2000
+save_total_limit: 3
 
-# ---- Training ----
-epochs: 3
-train_batch_size: 8         # per-device batch size
-grad_accum: 1               # gradient accumulation steps
-max_length: 512             # sequence length for tokenization
+# Train
+batch_size_per_device: 1
+gradient_accumulation_steps: 16
+num_train_epochs: 1
+learning_rate: 3.0e-4
+warmup_ratio: 0.01
+weight_decay: 0.1
 
-# ---- Optimizer / Schedule ----
-lr: 0.00005                 # 5e-5 (float, not quoted)
-weight_decay: 0.01
-warmup_ratio: 0.05
+# Precision & mem
+bf16: true
+gradient_checkpointing: true
+flash_attention: true
 
-# ---- Eval / Logging / Checkpointing ----
-eval_split: 0.01            # 1% of data for eval
-logging_steps: 100
-save_steps: 500             # save checkpoint every N steps
-seed: 42
-
-# Performance (GPU)
-fp16: true        # set bf16: true & fp16: false if your stack/GPU supports bf16 well
-bf16: false
-num_workers: 4    # bump to 8 if dataloader is the bottleneck
-pin_memory: auto  # our code treats 'auto' as True on GPU, False on CPU
-grad_ckpt: true   # reduces VRAM; a bit slower but safer
-
-# Throughput
-train_batch_size: 16   # if OOM, try 8 or 4, and raise grad_accum accordingly
-grad_accum: 2          # effective batch = batch_size * grad_accum * num_gpus
-max_length: 512        # if OOM, try 384 or 256
-
-# Logging/ckpt (keep)
-logging_steps: 100
-save_steps: 1000       # fewer, larger checkpoints for long runs
+# Tokenizer
+tokenizer_dir: "out/tokenizer" # or a pretrained tokenizer path
