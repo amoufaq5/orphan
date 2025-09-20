@@ -1,0 +1,5 @@
+corpus_glob: data/corpus/*.jsonl.gz
+output_dir: out/tokenizer
+vocab_size: 32000
+min_frequency: 2
+special_tokens: ["<pad>", "<s>", "</s>", "<unk>"]
