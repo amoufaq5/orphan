@@ -1,15 +1,29 @@
-pydantic>=2.8
-pyyaml>=6.0.1
-httpx>=0.27
-tenacity>=8.2
+# Core
+transformers>=4.44
+datasets>=2.20
+tokenizers>=0.19
+accelerate>=0.34
+trl>=0.9.6
+peft>=0.12
+bitsandbytes>=0.44.1
+safetensors>=0.4
+sentencepiece>=0.2
+pyyaml>=6.0
+rich>=13.7
 tqdm>=4.66
-fastapi>=0.112
-uvicorn>=0.30
-orjson>=3.10
-numpy>=1.26
+pydantic>=2.8
+requests>=2.32
+urllib3>=2.2
+aiohttp>=3.10
+fastapi>=0.114
+uvicorn[standard]>=0.30
+gradio>=4.43
+# Data & utils
 pandas>=2.2
-python-dateutil>=2.9.0.post0
-sentencepiece>=0.2.0
-tokenizers>=0.20.0
-regex>=2024.5.15
-torch>=2.3
+orjson>=3.10
+xxhash>=3.5
+zstandard>=0.23
+# Kaggle
+kaggle>=1.5
+# Optional metrics/vis
+wandb>=0.17
