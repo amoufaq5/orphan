@@ -1,0 +1,110 @@
+# H100 GPU Optimization Configuration
+
+# Hardware specifications
+hardware:
+  gpu_type: "H100"
+  num_gpus: 8
+  memory_per_gpu: "80GB"
+  nvlink_bandwidth: "900GB/s"
+  pcie_bandwidth: "128GB/s"
+
+# Training optimizations
+training:
+  # Mixed precision settings
+  mixed_precision:
+    enabled: true
+    dtype: "bfloat16"  # H100 optimized
+    loss_scale: "dynamic"
+    
+  # Memory optimizations
+  memory:
+    gradient_checkpointing: true
+    activation_checkpointing: true
+    cpu_offload: false  # H100 has enough memory
+    zero_stage: 2  # DeepSpeed ZeRO stage 2
+    
+  # Parallelization
+  parallelization:
+    data_parallel: true
+    model_parallel: false  # For models < 70B
+    pipeline_parallel: false
+    tensor_parallel: false
+    
+  # Batch size optimization for H100
+  batch_size:
+    per_device_train_batch_size: 16
+    per_device_eval_batch_size: 32
+    gradient_accumulation_steps: 4
+    dataloader_num_workers: 8
+    
+  # Learning rate scheduling
+  learning_rate:
+    base_lr: 2e-4
+    warmup_steps: 1000
+    scheduler: "cosine"
+    min_lr_ratio: 0.1
+    
+  # Compilation optimizations
+  compilation:
+    torch_compile: true
+    compile_mode: "max-autotune"
+    dynamic_shapes: false
+    
+# Model architecture optimizations
+model:
+  # Attention optimizations
+  attention:
+    flash_attention: true
+    flash_attention_version: 2
+    attention_dropout: 0.0
+    
+  # Activation functions optimized for H100
+  activations:
+    use_gelu_new: true
+    use_swiglu: false  # GELU is faster on H100
+    
+  # Embedding optimizations
+  embeddings:
+    tie_word_embeddings: true
+    embedding_dropout: 0.1
+
+# I/O optimizations
+io:
+  # Data loading
+  dataloader:
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 4
+    
+  # Checkpointing
+  checkpointing:
+    save_strategy: "steps"
+    save_steps: 1000
+    save_total_limit: 3
+    load_best_model_at_end: true
+    
+  # Logging
+  logging:
+    log_level: "INFO"
+    log_on_each_node: false
+    logging_steps: 100
+
+# Distributed training settings
+distributed:
+  backend: "nccl"
+  find_unused_parameters: false
+  bucket_cap_mb: 25
+  
+# Performance monitoring
+monitoring:
+  track_memory: true
+  track_throughput: true
+  profile_steps: [100, 110]  # Profile steps 100-110
+  
+# Environment variables for H100
+environment:
+  CUDA_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+  NCCL_DEBUG: "INFO"
+  NCCL_IB_DISABLE: "0"
+  NCCL_NET_GDR_LEVEL: "2"
+  PYTORCH_CUDA_ALLOC_CONF: "max_split_size_mb:512"

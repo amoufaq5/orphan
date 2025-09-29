@@ -1,0 +1,209 @@
+# SNOMED CT Configuration
+
+# SNOMED CT Release Information
+snomed:
+  version: "20240301"  # International Release
+  edition: "INT"       # International Edition
+  language: "en"       # English
+  
+  # Download URLs (official SNOMED CT releases)
+  download:
+    base_url: "https://download.nlm.nih.gov/umls/kss/IHTSDO20240301/SnomedCT_InternationalRF2_PRODUCTION_20240301T120000Z.zip"
+    rf2_format: true
+    
+  # Local paths
+  paths:
+    download_dir: "data/ontologies/snomed/downloads"
+    extract_dir: "data/ontologies/snomed/extracted"
+    processed_dir: "data/ontologies/snomed/processed"
+    index_dir: "data/ontologies/snomed/index"
+    
+  # Core SNOMED CT files to process
+  core_files:
+    concepts: "Terminology/sct2_Concept_Full_INT_*.txt"
+    descriptions: "Terminology/sct2_Description_Full-en_INT_*.txt"
+    relationships: "Terminology/sct2_Relationship_Full_INT_*.txt"
+    text_definitions: "Terminology/sct2_TextDefinition_Full-en_INT_*.txt"
+    
+  # Reference sets for medical domains
+  refsets:
+    # Clinical findings
+    clinical_finding: "900000000000207008"
+    # Procedure
+    procedure: "71388002"
+    # Pharmaceutical / biologic product
+    pharmaceutical: "373873005"
+    # Substance
+    substance: "105590001"
+    # Body structure
+    body_structure: "123037004"
+    # Disorder
+    disorder: "64572001"
+    # Symptom
+    symptom: "418799008"
+    # Sign
+    sign: "72670004"
+
+# Disease-Symptom Mapping Configuration
+disease_symptom_mapping:
+  # Relationship types for symptom associations
+  relationship_types:
+    # "Associated with" relationships
+    associated_with: "47429007"
+    # "Has manifestation" relationships  
+    has_manifestation: "363714003"
+    # "Clinical course" relationships
+    clinical_course: "263502005"
+    # "Severity" relationships
+    severity: "246112005"
+    # "Onset" relationships
+    onset: "246454002"
+    
+  # Confidence thresholds
+  confidence:
+    high: 0.9
+    medium: 0.7
+    low: 0.5
+    
+  # Mapping output formats
+  output:
+    json_file: "data/ontologies/snomed/disease_symptom_map.json"
+    csv_file: "data/ontologies/snomed/disease_symptom_map.csv"
+    pickle_file: "data/ontologies/snomed/disease_symptom_map.pkl"
+    
+# Search and Query Configuration
+search:
+  # Elasticsearch configuration for SNOMED search
+  elasticsearch:
+    enabled: false
+    host: "localhost"
+    port: 9200
+    index_name: "snomed_ct"
+    
+  # FAISS configuration for vector search
+  faiss:
+    enabled: true
+    dimension: 768  # Embedding dimension
+    index_type: "IVF"  # Index type (IVF, HNSW, etc.)
+    nlist: 1000  # Number of clusters for IVF
+    
+  # Text similarity thresholds
+  similarity:
+    exact_match: 1.0
+    high_similarity: 0.9
+    medium_similarity: 0.7
+    low_similarity: 0.5
+
+# Processing Configuration
+processing:
+  # Batch sizes for processing
+  batch_size:
+    concepts: 10000
+    descriptions: 50000
+    relationships: 100000
+    
+  # Memory optimization
+  memory:
+    chunk_size: 1000000  # Process in chunks
+    use_dask: true       # Use Dask for large datasets
+    
+  # Parallel processing
+  parallel:
+    num_workers: 8
+    use_multiprocessing: true
+    
+# Validation and Quality Control
+validation:
+  # Check for required fields
+  required_fields:
+    concepts: ["id", "effectiveTime", "active", "moduleId", "definitionStatusId"]
+    descriptions: ["id", "effectiveTime", "active", "moduleId", "conceptId", "languageCode", "typeId", "term", "caseSignificanceId"]
+    relationships: ["id", "effectiveTime", "active", "moduleId", "sourceId", "destinationId", "relationshipGroup", "typeId", "characteristicTypeId", "modifierId"]
+    
+  # Data quality checks
+  quality_checks:
+    check_duplicates: true
+    check_missing_values: true
+    check_invalid_dates: true
+    check_circular_relationships: true
+    
+# Caching Configuration
+caching:
+  # Enable caching for frequently accessed data
+  enabled: true
+  
+  # Cache backends
+  backends:
+    memory: true      # In-memory caching
+    redis: false      # Redis caching
+    file: true        # File-based caching
+    
+  # Cache TTL (time to live) in seconds
+  ttl:
+    concepts: 3600      # 1 hour
+    descriptions: 3600  # 1 hour
+    relationships: 1800 # 30 minutes
+    search_results: 300 # 5 minutes
+    
+  # Cache size limits
+  size_limits:
+    memory_mb: 1000   # 1GB memory cache
+    file_mb: 5000     # 5GB file cache
+
+# Integration with Other Ontologies
+integration:
+  # ICD-10 mapping
+  icd10:
+    enabled: true
+    mapping_file: "data/ontologies/mappings/snomed_icd10_map.txt"
+    
+  # ICD-11 mapping  
+  icd11:
+    enabled: false
+    mapping_file: "data/ontologies/mappings/snomed_icd11_map.txt"
+    
+  # UMLS mapping
+  umls:
+    enabled: true
+    mapping_file: "data/ontologies/mappings/snomed_umls_map.txt"
+    
+  # MeSH mapping
+  mesh:
+    enabled: true
+    mapping_file: "data/ontologies/mappings/snomed_mesh_map.txt"
+
+# API Configuration
+api:
+  # REST API settings
+  rest:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8001
+    prefix: "/snomed"
+    
+  # Rate limiting
+  rate_limit:
+    enabled: true
+    requests_per_minute: 1000
+    requests_per_hour: 10000
+    
+  # Authentication
+  auth:
+    enabled: false
+    api_key_required: false
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+  # Log files
+  files:
+    main: "logs/snomed_loader.log"
+    error: "logs/snomed_errors.log"
+    performance: "logs/snomed_performance.log"
+    
+  # Log rotation
+  rotation:
+    max_bytes: 10485760  # 10MB
+    backup_count: 5
