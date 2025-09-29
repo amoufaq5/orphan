@@ -40,7 +40,7 @@ After creating the GitHub repository, run these commands in your terminal:
 cd /Users/macbookpro/orphan
 
 # Add GitHub remote origin
-git remote add origin https://github.com/YOUR_USERNAME/orphan-medical-ai.git
+git remote add origin https://github.com/amoufaq5/orphan-medical-ai.git
 
 # Push to GitHub
 git branch -M main
