@@ -15,6 +15,17 @@ SECTION_HINTS = {
     "drug_label": ["indications", "dosage", "contraindications", "warnings", "adverse_reactions", "interactions", "storage"],
     "article":    ["abstract", "body"],
     "trial":      ["summary", "results", "eligibility"],
+    "compound":   ["summary"],
+    "variant":    ["clinical_significance", "conditions", "description"],
+    "patient_education": ["summary"],
+    "public_health": ["summary"],
+    "wellness": ["summary"],
+    "academic_paper": ["abstract", "body"],
+    "preprint": ["abstract", "body"],
+    "guideline": ["summary"],
+    "cme": ["summary"],
+    "drug_profile": ["summary"],
+    "rxnorm_concept": ["summary"],
 }
 
 def _row_to_rawdoc(row: Dict[str, Any]) -> RawDoc:
@@ -38,13 +49,15 @@ def _canonize(raw: RawDoc) -> CanonicalDoc:
     typ = (raw.meta.get("type") or "article").lower()
     sections = {}
     txt = (raw.text or "").strip()
+
     if typ == "drug_label":
         sections["body"] = txt
-    elif typ == "trial":
+    elif typ in ["trial", "article", "academic_paper", "preprint"]:
+        sections["abstract"] = raw.meta.get("abstract") or None
         sections["body"] = txt
+    elif typ in ["compound", "variant", "patient_education", "public_health", "wellness", "guideline", "cme", "drug_profile", "rxnorm_concept"]:
+        sections["summary"] = txt
     else:
-        # article
-        # If we detect 'Introduction', 'Methods', etc., we could split later. For now keep body.
         sections["body"] = txt
 
     # Ontology mapping (basic stubs)

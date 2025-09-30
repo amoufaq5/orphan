@@ -45,6 +45,7 @@ class WWHAM:
     how_long: str = ""
     action_taken: str = ""
     medication_used: str = ""
+    monitoring: str = ""
 
 @dataclass
 class TriageResult:
@@ -87,7 +88,7 @@ def triage(asmethod: ASMETHOD, wwham: WWHAM) -> TriageResult:
     joined = " | ".join(filter(None, [
         wwham.what_symptoms, wwham.action_taken, wwham.medication_used,
         " ".join(asmethod.other_symptoms or []), " ".join(asmethod.danger_symptoms or []),
-        " ".join(asmethod.history or [])
+        " ".join(asmethod.history or []), wwham.monitoring
     ])).lower()
 
     if any(b in joined for b in OTC_BLACKLIST):

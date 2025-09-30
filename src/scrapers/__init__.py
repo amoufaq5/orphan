@@ -10,3 +10,6 @@ Access submodules directly, e.g.:
 """
 
 __all__ = []  # keep empty; no side-effect imports
+
+# register extended scrapers on import (safe side effect)
+from . import extended_sources  # noqa: F401

@@ -7,16 +7,25 @@ SECTION_SPLIT = ["indications", "dosage", "contraindications", "warnings", "adve
 
 def to_canonical(raw: RawDoc) -> CanonicalDoc:
     rec = scrub_record(raw.model_dump())
+    meta = rec.get("meta", {})
+    doc_type = meta.get("type", "article")
     text = (rec.get("text") or "").strip()
-    sections = {"body": text}
-    # TODO: real sectioning per source type
+    sections: Dict[str, str | None]
+
+    if doc_type in {"drug_label"}:
+        sections = {"body": text}
+    elif doc_type in {"trial", "article", "academic_paper", "preprint"}:
+        sections = {"abstract": meta.get("abstract"), "body": text}
+    else:
+        sections = {"summary": text}
+
     prov = Provenance(**rec["prov"])
     return CanonicalDoc(
         id=rec["id"],
-        type=rec["meta"].get("type", "article"),
+        type=doc_type,
         title=rec.get("title"),
-        sections=sections,
-        lang=rec["meta"].get("lang", "en"),
+        sections={k: v for k, v in sections.items() if v},
+        lang=meta.get("lang", "en"),
         codes={},
         prov=prov,
     )

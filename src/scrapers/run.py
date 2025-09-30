@@ -2,6 +2,8 @@
 import os
 import sys
 import argparse
+import asyncio
+import inspect
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlencode
 
@@ -17,6 +19,7 @@ from src.utils.logger import get_logger
 from src.scrapers.http import make_session
 from src.scrapers.ctgov import fetch_term as ctgov_fetch_term  # ClinicalTrials.gov v2
 from src.scrapers.pubmed import fetch_term as pubmed_fetch_term
+from src.scrapers.registry import list_scrapers, get_scraper
 
 log = get_logger("scrape-runner")
 
@@ -247,6 +250,47 @@ def run_pubmed(conf: Dict[str, Any], overrides: argparse.Namespace) -> int:
 # ----------------------------
 # Dispatch & entrypoint
 # ----------------------------
+async def _run_registered_scraper(name: str, root_conf: Dict[str, Any], overrides: argparse.Namespace) -> int:
+    if not isinstance(root_conf, dict):
+        root_conf = {}
+    sources_conf = root_conf.get("sources", root_conf)
+    rate_limits = root_conf.get("rate_limits", {})
+
+    scraper_conf = sources_conf.get(name, {}) if isinstance(sources_conf, dict) else {}
+    rate_limit = rate_limits.get(name, scraper_conf.get("rate_limit", 1.0)) or 1.0
+    params: Dict[str, Any] = {
+        "out_dir": scraper_conf.get("out", f"./data/raw/{name}"),
+        "max_docs": scraper_conf.get("max_docs", 1000),
+        "max_pages": scraper_conf.get("max_pages", 50),
+        "shard_max_records": scraper_conf.get("shard_max_records", 500),
+        "rate_limit_per_sec": float(rate_limit),
+    }
+
+    # merge specific config keys
+    params.update({k: v for k, v in scraper_conf.items() if k not in params})
+
+    ScraperCls = get_scraper(name)
+
+    try:
+        init_sig = inspect.signature(ScraperCls.__init__)
+    except (TypeError, ValueError):
+        init_sig = None
+    if init_sig and "terms" in init_sig.parameters and "terms" not in params:
+        global_terms = root_conf.get("terms")
+        if isinstance(global_terms, list) and global_terms:
+            params["terms"] = global_terms
+
+    scraper = ScraperCls(**params)
+
+    if overrides.dry_run:
+        log.info(f"[{name}] dry-run enabled, skipping execution.")
+        return 0
+
+    result = await scraper.run()
+    log.info(f"[{name}] fetched={result.total_fetched} shards={result.shards_path}")
+    return result.total_fetched
+
+
 def main() -> None:
     args = parse_args()
     cfg = load_config(args.config)
@@ -257,20 +301,28 @@ def main() -> None:
     runners = {
         "clinicaltrials": run_clinicaltrials,
         "pubmed": run_pubmed,
-        # "openfda": run_openfda,  # add when ready
     }
+
+    registered = set(list_scrapers())
 
     overall_count = 0
     had_errors = False
 
     for src in requested_sources:
-        fn = runners.get(src)
-        if not fn:
-            log.error(f"Unknown source: {src}")
-            had_errors = True
-            continue
+        runner_fn = runners.get(src)
+        if not runner_fn:
+            if src in registered:
+                def runner_fn(cfg_all: Dict[str, Any], args_ns: argparse.Namespace, src_name: str = src) -> int:
+                    return asyncio.run(_run_registered_scraper(src_name, cfg_all, args_ns))
+            else:
+                log.error(f"Unknown source: {src}")
+                had_errors = True
+                continue
         try:
-            count = fn(cfg, args)
+            if runner_fn in (run_clinicaltrials, run_pubmed):
+                count = runner_fn(cfg.get("sources", {}), args)
+            else:
+                count = runner_fn(cfg, args)
             overall_count += int(count or 0)
         except KeyboardInterrupt:
             log.error(f"[{src}] interrupted by user.")

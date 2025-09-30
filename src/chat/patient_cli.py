@@ -33,24 +33,26 @@ def collect_asmethod() -> Tuple[ASMETHOD, WWHAM]:
         age=age,
         self_or_other=who,
         meds=[m.strip() for m in meds.split(",") if m.strip()],
-        extra_meds=[],
         time_course=how_long,
         history=[x.strip() for x in other.split(",") if x.strip()],
         other_symptoms=[s.strip() for s in what.split(",") if s.strip()],
         danger_symptoms=[danger] if danger else []
     )
+    action = ask("What advice or treatment have you been given so far (if any)?: ")
+    monitoring = ask("What advice or monitoring have you been given so far (if any)?: ")
+
     wwham = WWHAM(
         who=who,
         what_symptoms=what,
         how_long=how_long,
-        action_taken="",
-        medication_used=""
+        action_taken=action,
+        medication_used=meds,
+        monitoring=monitoring
     )
     return asmethod, wwham
 
 def call_api(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not API_URL:
-        # Fallback: local run_inference
         from src.api.infer import run_inference  # lazy import
         return run_inference(payload)
     r = requests.post(API_URL, json=payload, timeout=60)

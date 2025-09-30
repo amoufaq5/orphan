@@ -1,0 +1,140 @@
+# Medical Data Scraping Configuration
+# Optimized for NHS SAMD compliant medical AI training
+
+terms:
+  # Primary Care Conditions
+  - "diabetes mellitus type 2"
+  - "hypertension management"
+  - "chest pain diagnosis"
+  - "respiratory tract infection"
+  - "cardiovascular disease prevention"
+  - "mental health screening"
+  - "obesity treatment"
+  - "asthma management"
+  - "depression treatment"
+  - "anxiety disorders"
+  
+  # Emergency/Red Flag Conditions
+  - "acute myocardial infarction"
+  - "stroke symptoms"
+  - "pulmonary embolism"
+  - "sepsis diagnosis"
+  - "diabetic ketoacidosis"
+  - "anaphylaxis treatment"
+  
+  # Common Symptoms
+  - "headache differential diagnosis"
+  - "abdominal pain causes"
+  - "shortness of breath"
+  - "fatigue evaluation"
+  - "dizziness workup"
+
+sources:
+  pubmed:
+    max_pages: 15
+    page_size: 100
+    include_mesh: true
+    
+  clinicaltrials:
+    max_pages: 10
+    page_size: 50
+    status_filter: "RECRUITING,COMPLETED"
+    
+  dailymed:
+    max_pages: 5
+    page_size: 25
+    
+  openfda_labels:
+    max_pages: 8
+    page_size: 50
+
+  chembl:
+    page_size: 50
+    per_term_limit: 100
+
+  clinvar:
+    retmax: 100
+    per_term_limit: 100
+
+  medlineplus:
+    per_term_limit: 50
+
+  cdc_health:
+    page_size: 40
+    media_type: "Article"
+    per_term_limit: 80
+
+  nih_wellness:
+    per_term_limit: 50
+
+  semantic_scholar:
+    page_size: 40
+    per_term_limit: 120
+
+  europe_pmc:
+    page_size: 100
+    per_term_limit: 150
+
+  europe_pmc_biorxiv:
+    page_size: 50
+    per_term_limit: 150
+
+  europe_pmc_plos:
+    page_size: 80
+    per_term_limit: 150
+
+  cme_list:
+    feeds:
+      - "https://learning.acc.org/rss"  # ACC educational RSS
+      - "https://feeds.feedburner.com/AmericanCollegeOfPhysiciansCME"
+      - "https://www.cdc.gov/learning/rss/cme.xml"
+    max_items_per_feed: 40
+
+  acc_guidelines:
+    feeds:
+      - "https://www.acc.org/rss/Guidelines"
+      - "https://professional.heart.org/-/rss/aha-guidelines"  # AHA/ACC joint
+    max_items_per_feed: 40
+
+  drugbank:
+    per_term_limit: 60
+
+  rxnorm:
+    per_term_limit: 80
+
+# Output settings
+output:
+  format: "jsonl.gz"
+  base_path: "data/scraped"
+  include_metadata: true
+  deduplicate: true
+
+# Rate limiting (requests per second)
+rate_limits:
+  pubmed: 3
+  clinicaltrials: 2
+  dailymed: 1
+  openfda_labels: 2
+  chembl: 2
+  clinvar: 2
+  medlineplus: 2
+  cdc_health: 2
+  nih_wellness: 2
+  semantic_scholar: 1
+  europe_pmc: 3
+  europe_pmc_biorxiv: 3
+  europe_pmc_plos: 3
+  cme_list: 0.5
+  acc_guidelines: 0.5
+  drugbank: 1
+  rxnorm: 2
+
+# Quality filters
+filters:
+  min_text_length: 100
+  max_text_length: 50000
+  language: "en"
+  exclude_patterns:
+    - "advertisement"
+    - "sponsored content"
+    - "clinical trial recruitment"

@@ -22,10 +22,12 @@ logger = get_logger(__name__)
 
 
 class WHAMStage(Enum):
-    """WHAM protocol stages."""
+    """WWHAM protocol stages (Who, What, How, Action, Medication, Monitoring)."""
     WHO = "who"
+    WHAT = "what"
     HOW = "how" 
     ACTION = "action"
+    MEDICATION = "medication"
     MONITORING = "monitoring"
 
 
@@ -80,6 +82,7 @@ class WHAMAssessment:
     referral_urgency: str = "routine"  # "immediate", "urgent", "routine", "none"
     follow_up_timeframe: Optional[str] = None
     safety_netting: List[str] = field(default_factory=list)
+    actions_taken: List[str] = field(default_factory=list)
 
 
 class WHAMProtocol:
